@@ -285,6 +285,52 @@ async function main() {
   });
   await prisma.document.update({ where: { id: proposalTemplate.id }, data: { isTemplate: true } });
 
+  const proposalTemplateSections: {
+    key: string;
+    title: string;
+    sortOrder: number;
+    promptHint?: string;
+    requiresHuman?: boolean;
+  }[] = [
+    {
+      key: "executive_summary",
+      title: "Executive Summary",
+      sortOrder: 0,
+      promptHint: "Lead with the client's stated pain point, not our capabilities. Keep it to one short paragraph.",
+    },
+    {
+      key: "diagnosis",
+      title: "Current-State Diagnosis (KEYSHIFT)",
+      sortOrder: 1,
+      promptHint: "Frame the diagnosis using the KEYSHIFT Framework's eight dimensions.",
+    },
+    {
+      key: "roadmap",
+      title: "Target Operating Model & Roadmap",
+      sortOrder: 2,
+      promptHint: "Describe phases in terms of the Consulting Methodology (Diagnose, Design, Mobilise, Deliver, Sustain).",
+    },
+    {
+      key: "commercial_terms",
+      title: "Commercial Terms",
+      sortOrder: 3,
+      requiresHuman: true,
+    },
+    {
+      key: "team_governance",
+      title: "Team & Governance",
+      sortOrder: 4,
+      promptHint: "Describe engagement governance and review cadence, not named individuals.",
+    },
+  ];
+  for (const section of proposalTemplateSections) {
+    await prisma.proposalTemplateSection.upsert({
+      where: { templateDocId_key: { templateDocId: proposalTemplate.id, key: section.key } },
+      update: {},
+      create: { templateDocId: proposalTemplate.id, ...section },
+    });
+  }
+
   const aiIndex = await createDocument({
     categoryCode: "AIX",
     title: "Keyvantic AI Adoption Index — H1 2026",

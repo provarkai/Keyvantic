@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { href: "/search", label: "Search", icon: "⌕" },
   { href: "/graph", label: "Relationship Graph", icon: "◉" },
   { href: "/assistant", label: "AI Assistant", icon: "✦" },
+  { href: "/proposals", label: "Proposals", icon: "▣" },
   { href: "/clients", label: "Clients", icon: "◫" },
   { href: "/notifications", label: "Notifications", icon: "◔" },
 ];

@@ -75,6 +75,7 @@ export const PERMISSION_ACTIONS = [
   "role:manage",
   "ai:query",
   "search:semantic",
+  "proposal:generate",
 ] as const;
 
 export type PermissionAction = (typeof PERMISSION_ACTIONS)[number];
@@ -85,11 +86,12 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<RoleName, PermissionAction[]> = {
   [RoleName.PARTNER]: [
     "document:create", "document:read", "document:update", "document:submit_review",
     "document:approve", "document:archive", "document:export", "category:manage",
-    "client:manage", "comment:create", "ai:query", "search:semantic",
+    "client:manage", "comment:create", "ai:query", "search:semantic", "proposal:generate",
   ],
   [RoleName.CONSULTANT]: [
     "document:create", "document:read", "document:update", "document:submit_review",
     "document:export", "client:manage", "comment:create", "ai:query", "search:semantic",
+    "proposal:generate",
   ],
   [RoleName.RESEARCHER]: [
     "document:create", "document:read", "document:update", "document:submit_review",
@@ -101,7 +103,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<RoleName, PermissionAction[]> = {
   ],
   [RoleName.SALES]: [
     "document:create", "document:read", "document:update", "document:submit_review",
-    "document:export", "client:manage", "comment:create", "ai:query",
+    "document:export", "client:manage", "comment:create", "ai:query", "proposal:generate",
   ],
   [RoleName.MARKETING]: [
     "document:create", "document:read", "document:update", "document:submit_review",

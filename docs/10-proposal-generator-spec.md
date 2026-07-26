@@ -1,6 +1,6 @@
 # Proposal Generator — Feature Spec
 
-Status: **Draft for review** (not yet built). Scoped as the first Phase 4 module referenced in `docs/07-development-roadmap.md`.
+Status: **Built (v1)**. First Phase 4 module referenced in `docs/07-development-roadmap.md`. Implemented as specified below — `ProposalsModule` (backend), `/proposals` route group (frontend), reusing the existing Document/Version/Relationship/Approval infrastructure. Verified against real Postgres: cross-client retrieval isolation holds in both directions, commercial-terms sections are never AI-drafted, and generated documents file correctly into the client's Deliverables folder with `DERIVED_FROM` edges to the template and every source document used.
 
 ## 1. Problem
 

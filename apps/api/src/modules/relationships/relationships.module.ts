@@ -8,5 +8,6 @@ import { NotificationsModule } from "../notifications/notifications.module";
   imports: [AuditModule, NotificationsModule],
   providers: [RelationshipsService],
   controllers: [RelationshipsController],
+  exports: [RelationshipsService],
 })
 export class RelationshipsModule {}
