@@ -1,0 +1,136 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #ffffff;
+  --bg-subtle: #f4f6f8;
+  --bg-elevated: #ffffff;
+  --text: #0b1d33;
+  --text-muted: #5b6b7c;
+  --border: #e3e7ec;
+  --accent: #0b1d33;
+  --accent-contrast: #ffffff;
+  --gold: #c9a24b;
+}
+
+.dark {
+  --bg: #0b1220;
+  --bg-subtle: #101827;
+  --bg-elevated: #141c2c;
+  --text: #eef1f5;
+  --text-muted: #9aa7b8;
+  --border: #263043;
+  --accent: #eef1f5;
+  --accent-contrast: #0b1220;
+  --gold: #e4c97a;
+}
+
+* {
+  border-color: var(--border);
+}
+
+html,
+body {
+  background-color: var(--bg);
+  color: var(--text);
+}
+
+body {
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+.kv-card {
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+}
+
+.kv-prose {
+  color: var(--text);
+  line-height: 1.75;
+}
+.kv-prose h1 {
+  font-size: 1.75rem;
+  font-weight: 600;
+  margin: 1.5rem 0 0.75rem;
+}
+.kv-prose h2 {
+  font-size: 1.375rem;
+  font-weight: 600;
+  margin: 1.25rem 0 0.5rem;
+}
+.kv-prose h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin: 1rem 0 0.5rem;
+}
+.kv-prose p {
+  margin: 0.5rem 0;
+}
+.kv-prose ul,
+.kv-prose ol {
+  margin: 0.5rem 0 0.5rem 1.5rem;
+}
+.kv-prose blockquote {
+  border-left: 3px solid var(--gold);
+  padding-left: 1rem;
+  color: var(--text-muted);
+  margin: 0.75rem 0;
+}
+.kv-prose pre {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+}
+.kv-prose code {
+  background: var(--bg-subtle);
+  border-radius: 0.25rem;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.875em;
+}
+.kv-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+}
+.kv-prose th,
+.kv-prose td {
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.kv-prose .kv-callout {
+  border: 1px solid var(--gold);
+  background: color-mix(in srgb, var(--gold) 12%, transparent);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  margin: 0.75rem 0;
+}
+.kv-prose img {
+  max-width: 100%;
+  border-radius: 0.5rem;
+}
+
+.ProseMirror {
+  outline: none;
+  min-height: 320px;
+}
+.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: var(--text-muted);
+  float: left;
+  pointer-events: none;
+  height: 0;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 8px;
+}

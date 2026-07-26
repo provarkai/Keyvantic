@@ -1,0 +1,385 @@
+// Keyvantic Knowledge Operating System (KOS) — Database Schema
+// See /docs/02-database-schema.md for the design rationale.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Enums
+// ────────────────────────────────────────────────────────────────────────
+
+enum RoleName {
+  ADMINISTRATOR
+  PARTNER
+  CONSULTANT
+  RESEARCHER
+  DESIGNER
+  SALES
+  MARKETING
+  GUEST
+}
+
+enum DocumentStatus {
+  DRAFT
+  INTERNAL_REVIEW
+  APPROVED
+  ARCHIVED
+}
+
+enum ConfidentialityLevel {
+  PUBLIC
+  INTERNAL
+  CONFIDENTIAL
+  RESTRICTED
+}
+
+enum RelationshipType {
+  RELATES_TO
+  DEPENDS_ON
+  DERIVED_FROM
+  SUPERSEDES
+  REFERENCES
+}
+
+enum ApprovalDecision {
+  PENDING
+  APPROVED
+  REJECTED
+  CHANGES_REQUESTED
+}
+
+enum NotificationType {
+  DOCUMENT_APPROVED
+  REVIEW_DUE
+  DOCUMENT_CHANGED
+  COMMENT_ADDED
+  DEPENDENCY_CHANGED
+  MENTION
+  SUBMITTED_FOR_REVIEW
+}
+
+enum ExportFormat {
+  PDF
+  MARKDOWN
+  DOCX
+  HTML
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  STATUS_CHANGE
+  VERSION_CREATE
+  VERSION_RESTORE
+  LOGIN
+  LOGOUT
+  EXPORT
+  PERMISSION_CHANGE
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Identity & Access
+// ────────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  passwordHash  String
+  fullName      String
+  title         String? // e.g. "Managing Partner"
+  avatarUrl     String?
+  roleId        String
+  role          Role     @relation(fields: [roleId], references: [id])
+  isActive      Boolean  @default(true)
+  lastLoginAt   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  documentsAuthored   Document[]        @relation("DocumentAuthor")
+  documentsApproved   Document[]        @relation("DocumentApprover")
+  versionsCreated     DocumentVersion[] @relation("VersionAuthor")
+  comments            Comment[]
+  approvalsGiven      Approval[]        @relation("ApprovalReviewer")
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+  favorites           Favorite[]
+  recentlyViewed      RecentlyViewed[]
+  refreshTokens       RefreshToken[]
+
+  @@index([roleId])
+}
+
+model Role {
+  id          String       @id @default(cuid())
+  name        RoleName     @unique
+  description String?
+  isSystem    Boolean      @default(true)
+  users       User[]
+  permissions RolePermission[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model RolePermission {
+  id     String @id @default(cuid())
+  roleId String
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  action String // matches PermissionAction union in @keyvantic/types
+
+  @@unique([roleId, action])
+  @@index([roleId])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Master Library — Categories (self-referential tree) & Clients
+// ────────────────────────────────────────────────────────────────────────
+
+model Category {
+  id          String     @id @default(cuid())
+  name        String
+  code        String     @unique // short code used in document IDs, e.g. "BS" for Brand Strategy
+  slug        String     @unique
+  description String?
+  icon        String?
+  parentId    String?
+  parent      Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children    Category[] @relation("CategoryTree")
+  sortOrder   Int        @default(0)
+  documents   Document[]
+  client      Client?    @relation("ClientRootCategory")
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([parentId])
+}
+
+model Client {
+  id              String   @id @default(cuid())
+  name            String
+  logoUrl         String?
+  industry        String?
+  status          String   @default("ACTIVE") // ACTIVE | PROSPECT | ARCHIVED
+  rootCategoryId  String   @unique
+  rootCategory    Category @relation("ClientRootCategory", fields: [rootCategoryId], references: [id])
+  primaryContact  String?
+  engagementStart DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Documents & Versioning
+// ────────────────────────────────────────────────────────────────────────
+
+model Document {
+  id                   String               @id @default(cuid())
+  code                 String               @unique // KV-BS-001
+  title                String
+  summary              String?
+  categoryId           String
+  category             Category             @relation(fields: [categoryId], references: [id])
+  authorId             String
+  author               User                 @relation("DocumentAuthor", fields: [authorId], references: [id])
+  approverId           String?
+  approver             User?                @relation("DocumentApprover", fields: [approverId], references: [id])
+  status               DocumentStatus       @default(DRAFT)
+  confidentiality      ConfidentialityLevel @default(INTERNAL)
+  currentVersionNumber Int                  @default(1)
+  reviewDate           DateTime?
+  readTimeMinutes      Int                  @default(1)
+  wordCount            Int                  @default(0)
+  viewCount            Int                  @default(0)
+  isTemplate           Boolean              @default(false)
+
+  versions        DocumentVersion[]
+  tags            DocumentTag[]
+  comments        Comment[]
+  approvals       Approval[]
+  favoritedBy     Favorite[]
+  recentViews     RecentlyViewed[]
+  notifications   Notification[]
+
+  relationshipsFrom DocumentRelationship[] @relation("SourceDocument")
+  relationshipsTo   DocumentRelationship[] @relation("TargetDocument")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  @@index([categoryId])
+  @@index([authorId])
+  @@index([status])
+  @@index([confidentiality])
+}
+
+// Append-only. Every save creates a new immutable row; Document.currentVersionNumber
+// points at the latest. Restoring a version creates a NEW version copying old content
+// rather than mutating history, preserving a full audit trail.
+model DocumentVersion {
+  id             String   @id @default(cuid())
+  documentId     String
+  document       Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  versionNumber  Int
+  contentMarkdown String  @db.Text
+  contentHtml     String  @db.Text
+  changeSummary   String?
+  authorId        String
+  author          User     @relation("VersionAuthor", fields: [authorId], references: [id])
+  wordCount       Int      @default(0)
+  isRestoreOf     Int?     // if this version was created by restoring an older version number
+  createdAt       DateTime @default(now())
+
+  comments  Comment[]
+  approvals Approval[]
+
+  @@unique([documentId, versionNumber])
+  @@index([documentId])
+}
+
+model Tag {
+  id        String        @id @default(cuid())
+  name      String        @unique
+  slug      String        @unique
+  documents DocumentTag[]
+  createdAt DateTime      @default(now())
+}
+
+model DocumentTag {
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  tagId      String
+  tag        Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([documentId, tagId])
+  @@index([tagId])
+}
+
+// Typed, directed edges power both "Related Documents / Dependencies" on the
+// document detail page and the Relationship Graph view.
+model DocumentRelationship {
+  id               String           @id @default(cuid())
+  sourceDocumentId String
+  sourceDocument   Document         @relation("SourceDocument", fields: [sourceDocumentId], references: [id], onDelete: Cascade)
+  targetDocumentId String
+  targetDocument   Document         @relation("TargetDocument", fields: [targetDocumentId], references: [id], onDelete: Cascade)
+  type             RelationshipType @default(RELATES_TO)
+  note             String?
+  createdAt        DateTime         @default(now())
+
+  @@unique([sourceDocumentId, targetDocumentId, type])
+  @@index([sourceDocumentId])
+  @@index([targetDocumentId])
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Collaboration — Comments, Approvals, Audit
+// ────────────────────────────────────────────────────────────────────────
+
+model Comment {
+  id                String           @id @default(cuid())
+  documentId        String
+  document          Document         @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentVersionId String?
+  documentVersion   DocumentVersion? @relation(fields: [documentVersionId], references: [id], onDelete: SetNull)
+  authorId          String
+  author            User             @relation(fields: [authorId], references: [id])
+  body              String           @db.Text
+  resolvedAt        DateTime?
+  parentId          String?
+  parent            Comment?         @relation("CommentThread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies           Comment[]        @relation("CommentThread")
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@index([documentId])
+  @@index([parentId])
+}
+
+model Approval {
+  id                String           @id @default(cuid())
+  documentId        String
+  document          Document         @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentVersionId String
+  documentVersion   DocumentVersion  @relation(fields: [documentVersionId], references: [id], onDelete: Cascade)
+  reviewerId        String
+  reviewer          User             @relation("ApprovalReviewer", fields: [reviewerId], references: [id])
+  decision          ApprovalDecision @default(PENDING)
+  comment           String?
+  decidedAt         DateTime?
+  createdAt         DateTime         @default(now())
+
+  @@index([documentId])
+  @@index([reviewerId])
+}
+
+model AuditLog {
+  id         String      @id @default(cuid())
+  actorId    String?
+  actor      User?       @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action     AuditAction
+  entityType String      // "Document" | "DocumentVersion" | "User" | ...
+  entityId   String
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime    @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+}
+
+model Notification {
+  id         String           @id @default(cuid())
+  userId     String
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type       NotificationType
+  title      String
+  body       String?
+  documentId String?
+  document   Document?        @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  readAt     DateTime?
+  createdAt  DateTime         @default(now())
+
+  @@index([userId, readAt])
+  @@index([documentId])
+}
+
+model Favorite {
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@id([userId, documentId])
+}
+
+model RecentlyViewed {
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  viewedAt   DateTime @default(now())
+
+  @@id([userId, documentId])
+  @@index([userId, viewedAt])
+}
