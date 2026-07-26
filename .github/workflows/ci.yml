@@ -69,7 +69,7 @@ jobs:
         run: pnpm --filter api exec prisma migrate deploy
 
       - name: API unit tests
-        run: pnpm --filter api run test -- --passWithNoTests
+        run: pnpm --filter api run test
 
       - name: Build API
         run: pnpm --filter api run build
