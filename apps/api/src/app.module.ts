@@ -22,6 +22,7 @@ import { SearchModule } from "./modules/search/search.module";
 import { AiModule } from "./modules/ai/ai.module";
 import { AuditModule } from "./modules/audit/audit.module";
 import { HealthModule } from "./modules/health/health.module";
+import { ProposalsModule } from "./modules/proposals/proposals.module";
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { HealthModule } from "./modules/health/health.module";
     AiModule,
     AuditModule,
     HealthModule,
+    ProposalsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

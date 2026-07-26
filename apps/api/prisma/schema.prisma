@@ -84,6 +84,12 @@ enum AuditAction {
   PERMISSION_CHANGE
 }
 
+enum ProposalRunStatus {
+  GENERATING
+  DRAFTED
+  FAILED
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Identity & Access
 // ────────────────────────────────────────────────────────────────────────
@@ -112,6 +118,7 @@ model User {
   favorites           Favorite[]
   recentlyViewed      RecentlyViewed[]
   refreshTokens       RefreshToken[]
+  proposalRunsRequested ProposalRun[]
 
   @@index([roleId])
 }
@@ -184,6 +191,8 @@ model Client {
   engagementStart DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  proposalRuns ProposalRun[]
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -220,6 +229,10 @@ model Document {
 
   relationshipsFrom DocumentRelationship[] @relation("SourceDocument")
   relationshipsTo   DocumentRelationship[] @relation("TargetDocument")
+
+  templateSections   ProposalTemplateSection[] @relation("TemplateSections")
+  proposalRunsAsTemplate ProposalRun[]          @relation("TemplateRuns")
+  proposalRunAsResult    ProposalRun?           @relation("ProposalRunResult")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -382,4 +395,46 @@ model RecentlyViewed {
 
   @@id([userId, documentId])
   @@index([userId, viewedAt])
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Proposal Generator
+// ────────────────────────────────────────────────────────────────────────
+
+model ProposalTemplateSection {
+  id            String   @id @default(cuid())
+  templateDocId String
+  templateDoc   Document @relation("TemplateSections", fields: [templateDocId], references: [id], onDelete: Cascade)
+  key           String // "executive_summary" | "diagnosis" | "roadmap" | "commercial_terms" | "team_governance"
+  title         String
+  sortOrder     Int      @default(0)
+  promptHint    String?  @db.Text
+  requiresHuman Boolean  @default(false) // true for pricing/commercial terms — never AI-drafted
+  createdAt     DateTime @default(now())
+
+  @@unique([templateDocId, key])
+  @@index([templateDocId])
+}
+
+// One record per "generate a proposal for this client from this template" request.
+// sourceDocumentIds captures exactly which approved documents were retrieved per
+// section, so any generated output stays traceable back to what produced it.
+model ProposalRun {
+  id                String            @id @default(cuid())
+  templateDocId     String
+  templateDoc       Document          @relation("TemplateRuns", fields: [templateDocId], references: [id])
+  clientId          String
+  client            Client            @relation(fields: [clientId], references: [id])
+  requestedById     String
+  requestedBy       User              @relation(fields: [requestedById], references: [id])
+  resultDocumentId  String?           @unique
+  resultDocument    Document?         @relation("ProposalRunResult", fields: [resultDocumentId], references: [id])
+  status            ProposalRunStatus @default(GENERATING)
+  sourceDocumentIds Json?
+  error             String?
+  createdAt         DateTime          @default(now())
+  completedAt       DateTime?
+
+  @@index([clientId])
+  @@index([templateDocId])
 }

@@ -125,3 +125,41 @@ export interface CommentItem {
   author: UserSummary;
   replies: CommentItem[];
 }
+
+export interface ProposalTemplateSectionSummary {
+  id: string;
+  key: string;
+  title: string;
+  sortOrder: number;
+  promptHint?: string | null;
+  requiresHuman: boolean;
+}
+
+export interface ProposalTemplate {
+  id: string;
+  code: string;
+  title: string;
+  summary?: string | null;
+  category: { id: string; name: string };
+  templateSections: ProposalTemplateSectionSummary[];
+}
+
+export interface ClientSummary {
+  id: string;
+  name: string;
+  industry?: string | null;
+  status: string;
+}
+
+export interface ProposalRun {
+  id: string;
+  status: "GENERATING" | "DRAFTED" | "FAILED";
+  error?: string | null;
+  sourceDocumentIds?: string[] | null;
+  createdAt: string;
+  completedAt?: string | null;
+  client: { id: string; name: string };
+  templateDoc: { id: string; code: string; title: string };
+  resultDocument?: { id: string; code: string; title: string; status: DocumentStatus } | null;
+  requestedBy: { id: string; fullName: string };
+}

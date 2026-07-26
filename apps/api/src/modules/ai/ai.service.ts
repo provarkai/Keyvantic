@@ -25,7 +25,7 @@ const STOPWORDS = new Set([
   "summarize", "generate", "using", "version", "when", "were", "was", "are", "how",
 ]);
 
-function extractKeywords(text: string): string[] {
+export function extractKeywords(text: string): string[] {
   const words = text.toLowerCase().match(/[a-z0-9]{3,}/g) ?? [];
   return Array.from(new Set(words.filter((w) => !STOPWORDS.has(w))));
 }
