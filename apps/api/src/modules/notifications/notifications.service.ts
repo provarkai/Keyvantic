@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { NotificationType } from "@prisma/client";
+import { TenantContext } from "../../common/tenant/tenant-context";
 
 interface NotifyInput {
   userId: string;
@@ -15,13 +16,19 @@ export class NotificationsService {
   constructor(private prisma: PrismaService) {}
 
   async notify(input: NotifyInput) {
-    return this.prisma.notification.create({ data: input });
+    return this.prisma.notification.create({
+      data: { ...input, tenantId: TenantContext.requireTenantId() },
+    });
   }
 
   async notifyMany(userIds: string[], input: Omit<NotifyInput, "userId">) {
     const unique = Array.from(new Set(userIds));
     return this.prisma.notification.createMany({
-      data: unique.map((userId) => ({ ...input, userId })),
+      data: unique.map((userId) => ({
+        ...input,
+        userId,
+        tenantId: TenantContext.requireTenantId(),
+      })),
     });
   }
 

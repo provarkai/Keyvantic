@@ -5,6 +5,18 @@ import { DEFAULT_ROLE_PERMISSIONS, formatDocumentCode } from "@keyvantic/types";
 
 const prisma = new PrismaClient();
 
+/**
+ * The seed runs outside any request, so there is no tenant scope and RLS would reject
+ * every write. Setting app.bypass_rls for the session is correct here and nowhere in
+ * the application: this process is trusted and short-lived.
+ */
+async function bypassRls() {
+  await prisma.$executeRawUnsafe("SELECT set_config('app.bypass_rls', 'on', false)");
+}
+
+const TENANT_SLUG = process.env.SEED_TENANT_SLUG ?? "keyvantic";
+let tenantId = "";
+
 // ── 1. Master Library folder tree (matches the KOS spec exactly) ──────────
 interface CategorySeed {
   name: string;
@@ -101,9 +113,9 @@ async function seedCategoryTree(nodes: CategorySeed[], parentId: string | null, 
   for (const [index, node] of nodes.entries()) {
     const slug = node.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
     const category = await prisma.category.upsert({
-      where: { code: node.code },
+      where: { tenantId_code: { tenantId, code: node.code } },
       update: {},
-      create: { name: node.name, code: node.code, slug, parentId, sortOrder: sortOrder + index },
+      create: { tenantId, name: node.name, code: node.code, slug, parentId, sortOrder: sortOrder + index },
     });
     if (node.children) await seedCategoryTree(node.children, category.id, 0);
   }
@@ -113,15 +125,17 @@ async function seedRoles() {
   const roles: Record<RoleName, { id: string }> = {} as any;
   for (const roleName of Object.values(RoleName)) {
     const role = await prisma.role.upsert({
-      where: { name: roleName },
+      where: { tenantId_name: { tenantId, name: roleName } },
       update: {},
-      create: { name: roleName, description: `${roleName} role`, isSystem: true },
+      create: { tenantId, name: roleName, description: `${roleName} role`, isSystem: true },
     });
     roles[roleName] = role;
 
     const actions = DEFAULT_ROLE_PERMISSIONS[roleName];
     await prisma.rolePermission.deleteMany({ where: { roleId: role.id } });
-    await prisma.rolePermission.createMany({ data: actions.map((action) => ({ roleId: role.id, action })) });
+    await prisma.rolePermission.createMany({
+      data: actions.map((action) => ({ tenantId, roleId: role.id, action })),
+    });
   }
   return roles;
 }
@@ -144,7 +158,14 @@ async function seedUsers(roles: Record<RoleName, { id: string }>) {
     const user = await prisma.user.upsert({
       where: { email: u.email },
       update: {},
-      create: { email: u.email, passwordHash, fullName: u.fullName, title: u.title, roleId: roles[u.role].id },
+      create: { email: u.email, passwordHash, fullName: u.fullName, title: u.title },
+    });
+    // Role now lives on the membership, not the user — identity is global, the seat is
+    // per firm.
+    await prisma.tenantMember.upsert({
+      where: { tenantId_userId: { tenantId, userId: user.id } },
+      update: { roleId: roles[u.role].id },
+      create: { tenantId, userId: user.id, roleId: roles[u.role].id },
     });
     created[u.email] = user;
   }
@@ -162,13 +183,20 @@ async function createDocument(opts: {
   content: string;
   tags: string[];
 }) {
-  const category = await prisma.category.findUniqueOrThrow({ where: { code: opts.categoryCode } });
-  const existingCount = await prisma.document.count({ where: { categoryId: category.id } });
-  const code = formatDocumentCode(category.code, existingCount + 1);
+  const category = await prisma.category.findUniqueOrThrow({
+    where: { tenantId_code: { tenantId, code: opts.categoryCode } },
+  });
+  const sequence = await prisma.documentSequence.upsert({
+    where: { tenantId_categoryId: { tenantId, categoryId: category.id } },
+    update: { lastValue: { increment: 1 } },
+    create: { tenantId, categoryId: category.id, lastValue: 1 },
+  });
+  const code = formatDocumentCode(category.code, sequence.lastValue);
   const wordCount = opts.content.trim().split(/\s+/).length;
 
   const document = await prisma.document.create({
     data: {
+      tenantId,
       code,
       title: opts.title,
       summary: opts.summary,
@@ -185,6 +213,7 @@ async function createDocument(opts: {
 
   await prisma.documentVersion.create({
     data: {
+      tenantId,
       documentId: document.id,
       versionNumber: 1,
       contentMarkdown: opts.content,
@@ -197,8 +226,14 @@ async function createDocument(opts: {
 
   for (const tagName of opts.tags) {
     const slug = tagName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    const tag = await prisma.tag.upsert({ where: { slug }, update: {}, create: { name: tagName, slug } });
-    await prisma.documentTag.create({ data: { documentId: document.id, tagId: tag.id } });
+    const tag = await prisma.tag.upsert({
+      where: { tenantId_slug: { tenantId, slug } },
+      update: {},
+      create: { tenantId, name: tagName, slug },
+    });
+    await prisma.documentTag.create({
+      data: { tenantId, documentId: document.id, tagId: tag.id },
+    });
   }
 
   return document;
@@ -206,6 +241,20 @@ async function createDocument(opts: {
 
 async function main() {
   console.log("Seeding Keyvantic KOS...");
+  await bypassRls();
+
+  const tenant = await prisma.tenant.upsert({
+    where: { slug: TENANT_SLUG },
+    update: {},
+    create: {
+      name: "Keyvantic",
+      slug: TENANT_SLUG,
+      vertical: "CONSULTING",
+      status: "ACTIVE",
+    },
+  });
+  tenantId = tenant.id;
+  console.log(`Tenant: ${tenant.name} (${tenant.slug})`);
 
   await seedCategoryTree(MASTER_LIBRARY, null);
   const roles = await seedRoles();
@@ -246,6 +295,7 @@ async function main() {
   });
   await prisma.documentVersion.create({
     data: {
+      tenantId,
       documentId: consultingMethodology.id,
       versionNumber: 2,
       contentMarkdown:
@@ -309,7 +359,16 @@ async function main() {
     tags: ["governance", "ai", "policy"],
   });
   await prisma.approval.create({
-    data: { documentId: governanceDraft.id, documentVersionId: (await prisma.documentVersion.findFirstOrThrow({ where: { documentId: governanceDraft.id } })).id, reviewerId: partner.id },
+    data: {
+      tenantId,
+      documentId: governanceDraft.id,
+      documentVersionId: (
+        await prisma.documentVersion.findFirstOrThrow({
+          where: { documentId: governanceDraft.id },
+        })
+      ).id,
+      reviewerId: partner.id,
+    },
   });
 
   // ── Relationship graph chain ─────────────────────────────────────────────
@@ -323,16 +382,18 @@ async function main() {
     await prisma.documentRelationship.upsert({
       where: { sourceDocumentId_targetDocumentId_type: { sourceDocumentId, targetDocumentId, type } },
       update: {},
-      create: { sourceDocumentId, targetDocumentId, type },
+      create: { tenantId, sourceDocumentId, targetDocumentId, type },
     });
   }
 
   // ── Sample client with full sub-tree + a deliverable derived from the proposal template ──
-  const clientsRoot = await prisma.category.findUniqueOrThrow({ where: { code: "CLIENTS" } });
+  const clientsRoot = await prisma.category.findUniqueOrThrow({
+    where: { tenantId_code: { tenantId, code: "CLIENTS" } },
+  });
   const acmeRoot = await prisma.category.upsert({
-    where: { code: "ACME" },
+    where: { tenantId_code: { tenantId, code: "ACME" } },
     update: {},
-    create: { name: "Acme Federal Logistics", code: "ACME", slug: "acme-federal-logistics", parentId: clientsRoot.id },
+    create: { tenantId, name: "Acme Federal Logistics", code: "ACME", slug: "acme-federal-logistics", parentId: clientsRoot.id },
   });
   const acmeSubfolders = [
     { name: "Company Profile", code: "ACME-PROFILE" },
@@ -345,15 +406,15 @@ async function main() {
   ];
   for (const [index, sf] of acmeSubfolders.entries()) {
     await prisma.category.upsert({
-      where: { code: sf.code },
+      where: { tenantId_code: { tenantId, code: sf.code } },
       update: {},
-      create: { name: sf.name, code: sf.code, slug: `acme-${sf.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, parentId: acmeRoot.id, sortOrder: index },
+      create: { tenantId, name: sf.name, code: sf.code, slug: `acme-${sf.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, parentId: acmeRoot.id, sortOrder: index },
     });
   }
   await prisma.client.upsert({
     where: { rootCategoryId: acmeRoot.id },
     update: {},
-    create: { name: "Acme Federal Logistics", industry: "Public Sector Logistics", rootCategoryId: acmeRoot.id, primaryContact: "J. Alvarez, COO" },
+    create: { tenantId, name: "Acme Federal Logistics", industry: "Public Sector Logistics", rootCategoryId: acmeRoot.id, primaryContact: "J. Alvarez, COO" },
   });
 
   const deliverable = await createDocument({
@@ -376,7 +437,7 @@ async function main() {
       },
     },
     update: {},
-    create: { sourceDocumentId: deliverable.id, targetDocumentId: proposalTemplate.id, type: "DERIVED_FROM" },
+    create: { tenantId, sourceDocumentId: deliverable.id, targetDocumentId: proposalTemplate.id, type: "DERIVED_FROM" },
   });
 
   console.log("Seed complete.");

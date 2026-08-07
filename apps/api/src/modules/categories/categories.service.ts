@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CreateCategoryDto } from "./dto/create-category.dto";
+import { TenantContext } from "../../common/tenant/tenant-context";
 
 function slugify(value: string) {
   return value
@@ -45,6 +46,7 @@ export class CategoriesService {
   async create(dto: CreateCategoryDto) {
     return this.prisma.category.create({
       data: {
+        tenantId: TenantContext.requireTenantId(),
         name: dto.name,
         code: dto.code.toUpperCase(),
         slug: slugify(dto.name),

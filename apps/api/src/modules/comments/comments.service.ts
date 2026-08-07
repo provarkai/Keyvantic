@@ -3,6 +3,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { CreateCommentDto } from "./dto/create-comment.dto";
 import { NotificationsService } from "../notifications/notifications.service";
 import type { JwtUserPayload } from "@keyvantic/types";
+import { TenantContext } from "../../common/tenant/tenant-context";
 
 @Injectable()
 export class CommentsService {
@@ -25,6 +26,7 @@ export class CommentsService {
   async create(documentId: string, dto: CreateCommentDto, actor: JwtUserPayload) {
     const comment = await this.prisma.comment.create({
       data: {
+        tenantId: TenantContext.requireTenantId(),
         documentId,
         documentVersionId: dto.documentVersionId,
         parentId: dto.parentId,

@@ -68,8 +68,19 @@ jobs:
       - name: Run database migrations
         run: pnpm --filter api exec prisma migrate deploy
 
-      - name: API unit tests
+      # The access-control tests must run as the unprivileged role the API uses in
+      # production. Postgres exempts superusers from row-level security entirely, so
+      # running them as the migration user would make every isolation test pass
+      # while proving nothing.
+      - name: Provision unprivileged application role
+        run: |
+          psql "$DATABASE_URL" -v app_password="'kos_app'" \
+            -f apps/api/prisma/provision-app-role.sql
+
+      - name: API tests
         run: pnpm --filter api run test
+        env:
+          DATABASE_URL: postgresql://kos_app:kos_app@localhost:5432/keyvantic_kos_test?schema=public
 
       - name: Build API
         run: pnpm --filter api run build

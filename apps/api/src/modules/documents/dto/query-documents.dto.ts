@@ -8,6 +8,10 @@ export class QueryDocumentsDto {
   categoryId?: string;
 
   @IsOptional()
+  @IsString()
+  engagementId?: string;
+
+  @IsOptional()
   @IsEnum(DocumentStatus)
   status?: DocumentStatus;
 

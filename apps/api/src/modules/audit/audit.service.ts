@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AuditAction, Prisma } from "@prisma/client";
+import { TenantContext } from "../../common/tenant/tenant-context";
 
 interface LogInput {
   actorId?: string | null;
@@ -9,6 +10,8 @@ interface LogInput {
   entityId: string;
   metadata?: Prisma.InputJsonValue;
   ipAddress?: string;
+  /** Defaults to the request's tenant; pass explicitly only from outside a request. */
+  tenantId?: string;
 }
 
 @Injectable()
@@ -18,6 +21,7 @@ export class AuditService {
   async log(input: LogInput) {
     return this.prisma.auditLog.create({
       data: {
+        tenantId: input.tenantId ?? TenantContext.requireTenantId(),
         actorId: input.actorId ?? null,
         action: input.action,
         entityType: input.entityType,

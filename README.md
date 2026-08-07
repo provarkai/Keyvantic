@@ -41,8 +41,15 @@ pnpm install
 # Start stateful infra only (fastest iteration — run api/web on the host)
 docker compose up -d postgres redis meilisearch
 
-pnpm run db:migrate   # apply Prisma migrations
-pnpm run db:seed      # seed roles, permissions, Master Library tree, and sample documents
+pnpm run db:migrate   # apply Prisma migrations (runs as the owner role)
+
+# One-off: create the unprivileged role the API connects as. Postgres exempts
+# superusers from row-level security entirely, so connecting the API as the
+# migration user would silently disable tenant isolation.
+psql "$ADMIN_DATABASE_URL" -v app_password="'kos_app'" \
+  -f apps/api/prisma/provision-app-role.sql
+
+pnpm run db:seed      # seed a tenant, roles, permissions, Master Library, sample docs
 pnpm run dev          # builds packages/types, then runs api (:4000) + web (:3000)
 ```
 
@@ -83,7 +90,9 @@ pnpm run db:studio   # Prisma Studio against the local database
 - **Search**: full-text + faceted search via Meilisearch with an automatic Postgres fallback; keyword-ranked "semantic" search that upgrades to real embeddings when `OPENAI_API_KEY` is set.
 - **Relationship graph**: typed, directed document relationships rendered as a clickable graph view.
 - **AI assistant**: RAG-style Q&A restricted to `APPROVED` documents (respecting confidentiality and role), version comparison, and "what changed this month" — with a labeled extractive fallback when no OpenAI key is configured.
-- **RBAC**: 8 roles with a configurable, per-action permission matrix editable from Admin → Roles & Permissions.
+- **Multi-tenancy**: every tenant-scoped table carries `tenantId` and is protected by a Postgres Row-Level Security policy keyed on a per-request session setting, so a forgotten `where` clause returns zero rows rather than another firm's data. The API refuses to boot in production if it detects a database role that bypasses RLS.
+- **Engagements**: the matter/engagement is the confidentiality boundary. Documents filed against one are visible only to its team; an `EngagementMember` row with `DENIED` is an ethical wall that overrides every role permission, including a partner's.
+- **RBAC**: 8 roles with a configurable, per-action permission matrix editable from Admin → Roles & Permissions, resolved per tenant. Document visibility runs through a single predicate (`AccessService.documentWhere`) used by every read path — list, get, search, semantic search, export, and AI retrieval.
 - **Branding**: light/dark theme, responsive layout, Keyvantic navy/gold visual identity.
 
 See [`docs/07-development-roadmap.md`](./docs/07-development-roadmap.md) for what's intentionally deferred (native diagram/flowchart tooling, upload-based video hosting, embedded PDF viewer, deeper knowledge-graph analytics) and the phased plan for future modules (CRM, Project Management, Proposal Generator, AI Transformation Assessment, Client Portal, LMS, Research Publishing, Executive/Financial Dashboards, Internal AI Copilot).

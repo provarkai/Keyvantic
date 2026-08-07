@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { SearchService } from "../search/search.service";
+import { AccessService } from "../../common/access/access.service";
 import { AiClientService } from "./ai-client.service";
 import type { JwtUserPayload } from "@keyvantic/types";
 
@@ -36,28 +37,44 @@ export class AiService {
     private prisma: PrismaService,
     private search: SearchService,
     private aiClient: AiClientService,
+    private access: AccessService,
   ) {}
 
-  /** Retrieval is hard-restricted to APPROVED documents, respecting confidentiality vs. role. */
+  /**
+   * Retrieval is hard-restricted to APPROVED documents the actor may read.
+   *
+   * Visibility comes from the shared predicate — engagement membership and ethical
+   * walls included — with APPROVED applied on top, because unapproved material must
+   * never become an answer even to someone allowed to read the draft. This module
+   * previously carried its own third interpretation of confidentiality, which
+   * disagreed with both the documents and search modules.
+   */
   private async retrieveApprovedContext(query: string, actor: JwtUserPayload, limit = 6): Promise<RetrievedContext[]> {
-    const isPrivileged = ["ADMINISTRATOR", "PARTNER"].includes(actor.role);
-    const confidentialityFilter = isPrivileged ? undefined : { in: ["PUBLIC" as const, "INTERNAL" as const] };
+    const visibleAndApproved = await this.access.documentWhereWithFilters(actor, {
+      status: "APPROVED",
+    });
     const keywords = extractKeywords(query);
 
     const candidates = await this.prisma.document.findMany({
       where: {
-        deletedAt: null,
-        status: "APPROVED",
-        confidentiality: confidentialityFilter,
-        ...(keywords.length > 0
-          ? {
-              OR: keywords.flatMap((word) => [
-                { title: { contains: word, mode: "insensitive" as const } },
-                { summary: { contains: word, mode: "insensitive" as const } },
-                { versions: { some: { contentMarkdown: { contains: word, mode: "insensitive" as const } } } },
-              ]),
-            }
-          : {}),
+        AND: [
+          visibleAndApproved,
+          ...(keywords.length > 0
+            ? [
+                {
+                  OR: keywords.flatMap((word) => [
+                    { title: { contains: word, mode: "insensitive" as const } },
+                    { summary: { contains: word, mode: "insensitive" as const } },
+                    {
+                      versions: {
+                        some: { contentMarkdown: { contains: word, mode: "insensitive" as const } },
+                      },
+                    },
+                  ]),
+                },
+              ]
+            : []),
+        ],
       },
       include: { category: true, versions: { orderBy: { versionNumber: "desc" }, take: 1 } },
       take: 50,
@@ -78,7 +95,7 @@ export class AiService {
     const pool = ranked.some((r) => r.score > 0)
       ? ranked.filter((r) => r.score > 0).slice(0, limit).map((r) => r.doc)
       : await this.prisma.document.findMany({
-          where: { deletedAt: null, status: "APPROVED", confidentiality: confidentialityFilter },
+          where: visibleAndApproved,
           include: { category: true, versions: { orderBy: { versionNumber: "desc" }, take: 1 } },
           orderBy: { updatedAt: "desc" },
           take: limit,
@@ -145,10 +162,14 @@ export class AiService {
   }
 
   async compareVersions(documentId: string, fromVersion: number, toVersion: number, actor: JwtUserPayload) {
-    const document = await this.prisma.document.findUnique({ where: { id: documentId } });
-    const isPrivileged = ["ADMINISTRATOR", "PARTNER"].includes(actor.role);
-    const visibleConfidentiality = isPrivileged || document?.confidentiality === "PUBLIC" || document?.confidentiality === "INTERNAL";
-    if (!document || document.status !== "APPROVED" || !visibleConfidentiality) {
+    // Same predicate as every other read path, plus the APPROVED requirement.
+    const visibleAndApproved = await this.access.documentWhereWithFilters(actor, {
+      status: "APPROVED",
+    });
+    const document = await this.prisma.document.findFirst({
+      where: { AND: [{ id: documentId }, visibleAndApproved] },
+    });
+    if (!document) {
       return { answer: "I can only compare versions of APPROVED documents you have access to.", sources: [] };
     }
     const [from, to] = await Promise.all([
@@ -172,14 +193,12 @@ export class AiService {
     since.setDate(1);
     since.setHours(0, 0, 0, 0);
 
-    const isPrivileged = ["ADMINISTRATOR", "PARTNER"].includes(actor.role);
+    const visibleAndApproved = await this.access.documentWhereWithFilters(actor, {
+      status: "APPROVED",
+      updatedAt: { gte: since },
+    });
     const docs = await this.prisma.document.findMany({
-      where: {
-        deletedAt: null,
-        status: "APPROVED",
-        updatedAt: { gte: since },
-        confidentiality: isPrivileged ? undefined : { in: ["PUBLIC", "INTERNAL"] },
-      },
+      where: visibleAndApproved,
       orderBy: { updatedAt: "desc" },
       take: 20,
       include: { category: true, versions: { orderBy: { versionNumber: "desc" }, take: 1 } },

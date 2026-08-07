@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CreateClientDto } from "./dto/create-client.dto";
+import { TenantContext } from "../../common/tenant/tenant-context";
 
 const CLIENT_SUBFOLDERS = [
   { name: "Company Profile", code: "PROFILE" },
@@ -39,9 +40,12 @@ export class ClientsService {
     const slugBase = slugify(dto.name);
     const codeBase = dto.name.replace(/[^A-Za-z]/g, "").slice(0, 4).toUpperCase() || "CLI";
 
-    return this.prisma.$transaction(async (tx) => {
+    const tenantId = TenantContext.requireTenantId();
+
+    return this.prisma.tenantTransaction(async (tx) => {
       const rootCategory = await tx.category.create({
         data: {
+          tenantId,
           name: dto.name,
           code: codeBase,
           slug: slugBase,
@@ -51,6 +55,7 @@ export class ClientsService {
 
       await tx.category.createMany({
         data: CLIENT_SUBFOLDERS.map((sf, index) => ({
+          tenantId,
           name: sf.name,
           code: `${codeBase}-${sf.code}`,
           slug: `${slugBase}-${slugify(sf.name)}`,
@@ -61,6 +66,7 @@ export class ClientsService {
 
       return tx.client.create({
         data: {
+          tenantId,
           name: dto.name,
           industry: dto.industry,
           primaryContact: dto.primaryContact,

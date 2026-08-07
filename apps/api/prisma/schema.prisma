@@ -1,5 +1,13 @@
-// Keyvantic Knowledge Operating System (KOS) — Database Schema
-// See /docs/02-database-schema.md for the design rationale.
+// Keyvantic KOS — Database Schema
+//
+// Multi-tenant. Every tenant-scoped table carries `tenantId` and is protected by a
+// Postgres Row-Level Security policy keyed on the `app.tenant_id` session setting
+// (see the RLS migration). Application-level filtering is defence in depth, not the
+// primary boundary — a forgotten `where` clause returns zero rows rather than another
+// tenant's data.
+//
+// See /docs/02-database-schema.md for the original design rationale and
+// /docs/10-saas-product-scope.md §3 for the tenancy model.
 
 generator client {
   provider = "prisma-client-js"
@@ -84,119 +92,292 @@ enum AuditAction {
   PERMISSION_CHANGE
 }
 
+enum TenantStatus {
+  TRIAL
+  ACTIVE
+  SUSPENDED
+}
+
+enum MembershipStatus {
+  INVITED
+  ACTIVE
+  SUSPENDED
+}
+
+enum EngagementStatus {
+  OPEN
+  ON_HOLD
+  CLOSED
+}
+
+/// Access a user has to a specific engagement. DENIED is an ethical wall — it is an
+/// explicit block that overrides any role permission the user otherwise holds.
+enum EngagementAccessLevel {
+  LEAD
+  MEMBER
+  VIEWER
+  DENIED
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Tenancy
+// ────────────────────────────────────────────────────────────────────────
+
+model Tenant {
+  id         String       @id @default(cuid())
+  name       String
+  slug       String       @unique // subdomain / login scope
+  vertical   String? // LAW | ACCOUNTING | CONSULTING | ...
+  dataRegion String       @default("eu-west-1")
+  status     TenantStatus @default(TRIAL)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  members       TenantMember[]
+  roles         Role[]
+  refreshTokens RefreshToken[]
+  categories    Category[]
+  clients       Client[]
+  engagements   Engagement[]
+  documents     Document[]
+  versions      DocumentVersion[]
+  tags          Tag[]
+  documentTags  DocumentTag[]
+  relationships DocumentRelationship[]
+  comments      Comment[]
+  approvals     Approval[]
+  auditLogs     AuditLog[]
+  notifications Notification[]
+  favorites     Favorite[]
+  recentViews   RecentlyViewed[]
+  sequences     DocumentSequence[]
+  engagementMembers EngagementMember[]
+}
+
+/// Identity is global — one person, one login, potentially several firms (contractors,
+/// fractional partners). Tenant-specific state lives on TenantMember, not here.
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  fullName     String
+  title        String? // e.g. "Managing Partner"
+  avatarUrl    String?
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  memberships       TenantMember[]
+  engagementSeats   EngagementMember[]
+  engagementsLed    Engagement[]      @relation("EngagementLead")
+  documentsAuthored Document[]        @relation("DocumentAuthor")
+  documentsApproved Document[]        @relation("DocumentApprover")
+  versionsCreated   DocumentVersion[] @relation("VersionAuthor")
+  comments          Comment[]
+  approvalsGiven    Approval[]        @relation("ApprovalReviewer")
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+  favorites         Favorite[]
+  recentlyViewed    RecentlyViewed[]
+  refreshTokens     RefreshToken[]
+}
+
+/// A user's membership of one tenant, carrying the role they hold *there*.
+model TenantMember {
+  id        String           @id @default(cuid())
+  tenantId  String
+  tenant    Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleId    String
+  role      Role             @relation(fields: [roleId], references: [id])
+  status    MembershipStatus @default(ACTIVE)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+  @@index([roleId])
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Identity & Access
 // ────────────────────────────────────────────────────────────────────────
 
-model User {
-  id            String   @id @default(cuid())
-  email         String   @unique
-  passwordHash  String
-  fullName      String
-  title         String? // e.g. "Managing Partner"
-  avatarUrl     String?
-  roleId        String
-  role          Role     @relation(fields: [roleId], references: [id])
-  isActive      Boolean  @default(true)
-  lastLoginAt   DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  documentsAuthored   Document[]        @relation("DocumentAuthor")
-  documentsApproved   Document[]        @relation("DocumentApprover")
-  versionsCreated     DocumentVersion[] @relation("VersionAuthor")
-  comments            Comment[]
-  approvalsGiven      Approval[]        @relation("ApprovalReviewer")
-  notifications       Notification[]
-  auditLogs           AuditLog[]
-  favorites           Favorite[]
-  recentlyViewed      RecentlyViewed[]
-  refreshTokens       RefreshToken[]
-
-  @@index([roleId])
-}
-
 model Role {
-  id          String       @id @default(cuid())
-  name        RoleName     @unique
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        RoleName
   description String?
-  isSystem    Boolean      @default(true)
-  users       User[]
+  isSystem    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members     TenantMember[]
   permissions RolePermission[]
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
 }
 
 model RolePermission {
-  id     String @id @default(cuid())
-  roleId String
-  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
-  action String // matches PermissionAction union in @keyvantic/types
+  id       String @id @default(cuid())
+  tenantId String
+  roleId   String
+  role     Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  action   String // matches PermissionAction union in @keyvantic/types
 
   @@unique([roleId, action])
   @@index([roleId])
+  @@index([tenantId])
 }
 
 model RefreshToken {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
+  tenantId  String
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tokenHash String   @unique
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
   expiresAt DateTime
   revokedAt DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
   @@index([userId])
+  @@index([tenantId])
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Master Library — Categories (self-referential tree) & Clients
+// Master Library — Categories, Clients, Engagements
 // ────────────────────────────────────────────────────────────────────────
 
 model Category {
   id          String     @id @default(cuid())
+  tenantId    String
+  tenant      Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   name        String
-  code        String     @unique // short code used in document IDs, e.g. "BS" for Brand Strategy
-  slug        String     @unique
+  code        String // short code used in document IDs, e.g. "BS"
+  slug        String
   description String?
   icon        String?
   parentId    String?
   parent      Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Cascade)
   children    Category[] @relation("CategoryTree")
   sortOrder   Int        @default(0)
-  documents   Document[]
-  client      Client?    @relation("ClientRootCategory")
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 
+  documents   Document[]
+  client      Client?            @relation("ClientRootCategory")
+  engagements Engagement[]       @relation("EngagementRootCategory")
+  sequences   DocumentSequence[]
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, slug])
   @@index([parentId])
+  @@index([tenantId])
 }
 
 model Client {
-  id              String   @id @default(cuid())
+  id              String    @id @default(cuid())
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   name            String
   logoUrl         String?
   industry        String?
-  status          String   @default("ACTIVE") // ACTIVE | PROSPECT | ARCHIVED
-  rootCategoryId  String   @unique
-  rootCategory    Category @relation("ClientRootCategory", fields: [rootCategoryId], references: [id])
+  status          String    @default("ACTIVE") // ACTIVE | PROSPECT | ARCHIVED
+  rootCategoryId  String    @unique
+  rootCategory    Category  @relation("ClientRootCategory", fields: [rootCategoryId], references: [id])
   primaryContact  String?
   engagementStart DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  engagements Engagement[]
+
+  @@index([tenantId])
+}
+
+/// The matter / engagement / case. This is the confidentiality boundary: access to a
+/// document is resolved against the team of the engagement it belongs to, not against
+/// firm-wide role permissions alone.
+model Engagement {
+  id             String           @id @default(cuid())
+  tenantId       String
+  tenant         Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  clientId       String
+  client         Client           @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  reference      String // the firm's own matter number
+  name           String
+  practiceArea   String?
+  status         EngagementStatus @default(OPEN)
+  leadId         String?
+  lead           User?            @relation("EngagementLead", fields: [leadId], references: [id])
+  rootCategoryId String?
+  rootCategory   Category?        @relation("EngagementRootCategory", fields: [rootCategoryId], references: [id])
+  openedAt       DateTime         @default(now())
+  closedAt       DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  members   EngagementMember[]
+  documents Document[]
+
+  @@unique([tenantId, reference])
+  @@index([tenantId])
+  @@index([clientId])
+}
+
+/// Team membership on an engagement. A row with accessLevel DENIED is an ethical wall
+/// and takes precedence over every other grant.
+model EngagementMember {
+  id           String                @id @default(cuid())
+  tenantId     String
+  tenant       Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  engagementId String
+  engagement   Engagement            @relation(fields: [engagementId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessLevel  EngagementAccessLevel @default(MEMBER)
+  note         String?
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+
+  @@unique([engagementId, userId])
+  @@index([userId])
+  @@index([tenantId])
 }
 
 // ────────────────────────────────────────────────────────────────────────
 // Documents & Versioning
 // ────────────────────────────────────────────────────────────────────────
 
+/// Monotonic per-(tenant, category) counter backing human-readable document codes.
+/// Replaces deriving the next number from a row count, which raced and collided after
+/// deletes.
+model DocumentSequence {
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  lastValue  Int      @default(0)
+
+  @@id([tenantId, categoryId])
+}
+
 model Document {
   id                   String               @id @default(cuid())
-  code                 String               @unique // KV-BS-001
+  tenantId             String
+  tenant               Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code                 String // KV-BS-001, unique per tenant
   title                String
   summary              String?
   categoryId           String
   category             Category             @relation(fields: [categoryId], references: [id])
+  engagementId         String?
+  engagement           Engagement?          @relation(fields: [engagementId], references: [id], onDelete: SetNull)
   authorId             String
   author               User                 @relation("DocumentAuthor", fields: [authorId], references: [id])
   approverId           String?
@@ -210,42 +391,47 @@ model Document {
   viewCount            Int                  @default(0)
   isTemplate           Boolean              @default(false)
 
-  versions        DocumentVersion[]
-  tags            DocumentTag[]
-  comments        Comment[]
-  approvals       Approval[]
-  favoritedBy     Favorite[]
-  recentViews     RecentlyViewed[]
-  notifications   Notification[]
+  versions      DocumentVersion[]
+  tags          DocumentTag[]
+  comments      Comment[]
+  approvals     Approval[]
+  favoritedBy   Favorite[]
+  recentViews   RecentlyViewed[]
+  notifications Notification[]
 
   relationshipsFrom DocumentRelationship[] @relation("SourceDocument")
   relationshipsTo   DocumentRelationship[] @relation("TargetDocument")
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
+  @@unique([tenantId, code])
   @@index([categoryId])
+  @@index([engagementId])
   @@index([authorId])
   @@index([status])
   @@index([confidentiality])
+  @@index([tenantId])
 }
 
 // Append-only. Every save creates a new immutable row; Document.currentVersionNumber
 // points at the latest. Restoring a version creates a NEW version copying old content
 // rather than mutating history, preserving a full audit trail.
 model DocumentVersion {
-  id             String   @id @default(cuid())
-  documentId     String
-  document       Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  versionNumber  Int
-  contentMarkdown String  @db.Text
-  contentHtml     String  @db.Text
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  documentId      String
+  document        Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  versionNumber   Int
+  contentMarkdown String   @db.Text
+  contentHtml     String   @db.Text
   changeSummary   String?
   authorId        String
   author          User     @relation("VersionAuthor", fields: [authorId], references: [id])
   wordCount       Int      @default(0)
-  isRestoreOf     Int?     // if this version was created by restoring an older version number
+  isRestoreOf     Int? // if this version was created by restoring an older version number
   createdAt       DateTime @default(now())
 
   comments  Comment[]
@@ -253,17 +439,26 @@ model DocumentVersion {
 
   @@unique([documentId, versionNumber])
   @@index([documentId])
+  @@index([tenantId])
 }
 
 model Tag {
   id        String        @id @default(cuid())
-  name      String        @unique
-  slug      String        @unique
+  tenantId  String
+  tenant    Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  slug      String
   documents DocumentTag[]
   createdAt DateTime      @default(now())
+
+  @@unique([tenantId, slug])
+  @@unique([tenantId, name])
+  @@index([tenantId])
 }
 
 model DocumentTag {
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   documentId String
   document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
   tagId      String
@@ -271,12 +466,15 @@ model DocumentTag {
 
   @@id([documentId, tagId])
   @@index([tagId])
+  @@index([tenantId])
 }
 
 // Typed, directed edges power both "Related Documents / Dependencies" on the
 // document detail page and the Relationship Graph view.
 model DocumentRelationship {
   id               String           @id @default(cuid())
+  tenantId         String
+  tenant           Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   sourceDocumentId String
   sourceDocument   Document         @relation("SourceDocument", fields: [sourceDocumentId], references: [id], onDelete: Cascade)
   targetDocumentId String
@@ -288,6 +486,7 @@ model DocumentRelationship {
   @@unique([sourceDocumentId, targetDocumentId, type])
   @@index([sourceDocumentId])
   @@index([targetDocumentId])
+  @@index([tenantId])
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -296,6 +495,8 @@ model DocumentRelationship {
 
 model Comment {
   id                String           @id @default(cuid())
+  tenantId          String
+  tenant            Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   documentId        String
   document          Document         @relation(fields: [documentId], references: [id], onDelete: Cascade)
   documentVersionId String?
@@ -312,10 +513,13 @@ model Comment {
 
   @@index([documentId])
   @@index([parentId])
+  @@index([tenantId])
 }
 
 model Approval {
   id                String           @id @default(cuid())
+  tenantId          String
+  tenant            Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   documentId        String
   document          Document         @relation(fields: [documentId], references: [id], onDelete: Cascade)
   documentVersionId String
@@ -329,14 +533,17 @@ model Approval {
 
   @@index([documentId])
   @@index([reviewerId])
+  @@index([tenantId])
 }
 
 model AuditLog {
   id         String      @id @default(cuid())
+  tenantId   String
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   actorId    String?
   actor      User?       @relation(fields: [actorId], references: [id], onDelete: SetNull)
   action     AuditAction
-  entityType String      // "Document" | "DocumentVersion" | "User" | ...
+  entityType String // "Document" | "DocumentVersion" | "User" | ...
   entityId   String
   metadata   Json?
   ipAddress  String?
@@ -345,10 +552,13 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([actorId])
   @@index([createdAt])
+  @@index([tenantId])
 }
 
 model Notification {
   id         String           @id @default(cuid())
+  tenantId   String
+  tenant     Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   userId     String
   user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   type       NotificationType
@@ -361,9 +571,12 @@ model Notification {
 
   @@index([userId, readAt])
   @@index([documentId])
+  @@index([tenantId])
 }
 
 model Favorite {
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   userId     String
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   documentId String
@@ -371,9 +584,12 @@ model Favorite {
   createdAt  DateTime @default(now())
 
   @@id([userId, documentId])
+  @@index([tenantId])
 }
 
 model RecentlyViewed {
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   userId     String
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   documentId String
@@ -382,4 +598,5 @@ model RecentlyViewed {
 
   @@id([userId, documentId])
   @@index([userId, viewedAt])
+  @@index([tenantId])
 }

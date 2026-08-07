@@ -3,6 +3,7 @@ import { ClientsService } from "./clients.service";
 import { CreateClientDto } from "./dto/create-client.dto";
 import { RequirePermissions } from "../../common/decorators/permissions.decorator";
 import { PrismaService } from "../../prisma/prisma.service";
+import { TenantContext } from "../../common/tenant/tenant-context";
 
 @Controller("clients")
 export class ClientsController {
@@ -24,7 +25,9 @@ export class ClientsController {
   @Post()
   @RequirePermissions("client:manage")
   async create(@Body() dto: CreateClientDto) {
-    const clientsRoot = await this.prisma.category.findUnique({ where: { code: "CLIENTS" } });
+    const clientsRoot = await this.prisma.category.findUnique({
+      where: { tenantId_code: { tenantId: TenantContext.requireTenantId(), code: "CLIENTS" } },
+    });
     if (!clientsRoot) throw new NotFoundException("09 Clients root category is not seeded");
     return this.clients.create(dto, clientsRoot.id);
   }

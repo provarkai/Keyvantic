@@ -8,7 +8,9 @@ import { AuditService } from "../audit/audit.service";
 import { SearchService } from "../search/search.service";
 import type { JwtUserPayload } from "@keyvantic/types";
 import { estimateReadTimeMinutes, formatDocumentCode } from "@keyvantic/types";
-import { DocumentStatus } from "@prisma/client";
+import { DocumentStatus, PrismaClient } from "@prisma/client";
+import { AccessService } from "../../common/access/access.service";
+import { TenantContext } from "../../common/tenant/tenant-context";
 
 const ALLOWED_TRANSITIONS: Record<DocumentStatus, DocumentStatus[]> = {
   DRAFT: ["INTERNAL_REVIEW"],
@@ -39,42 +41,71 @@ export class DocumentsService {
     private notifications: NotificationsService,
     private audit: AuditService,
     private search: SearchService,
+    private access: AccessService,
   ) {}
 
-  private async nextCode(categoryId: string) {
-    const category = await this.prisma.category.findUnique({ where: { id: categoryId } });
+  /**
+   * Allocate the next document code for a category.
+   *
+   * Uses a persisted counter rather than a row count. Counting raced under concurrent
+   * creates, and — worse — went backwards after a delete, so the next create collided
+   * with an existing code and violated the unique constraint.
+   *
+   * Must run inside `tenantTransaction` so the increment and the insert that consumes
+   * it commit together.
+   */
+  private async nextCode(tx: PrismaClient, tenantId: string, categoryId: string) {
+    const category = await tx.category.findUnique({ where: { id: categoryId } });
     if (!category) throw new NotFoundException("Category not found");
 
-    const count = await this.prisma.document.count({ where: { categoryId } });
-    return { code: formatDocumentCode(category.code, count + 1), category };
+    const sequence = await tx.documentSequence.upsert({
+      where: { tenantId_categoryId: { tenantId, categoryId } },
+      update: { lastValue: { increment: 1 } },
+      create: { tenantId, categoryId, lastValue: 1 },
+    });
+
+    return { code: formatDocumentCode(category.code, sequence.lastValue), category };
   }
 
   private async syncTags(documentId: string, tagNames: string[] | undefined) {
     if (!tagNames) return;
+    const tenantId = TenantContext.requireTenantId();
     await this.prisma.documentTag.deleteMany({ where: { documentId } });
     for (const name of tagNames) {
       const slug = slugifyTag(name);
       const tag = await this.prisma.tag.upsert({
-        where: { slug },
+        where: { tenantId_slug: { tenantId, slug } },
         update: {},
-        create: { name, slug },
+        create: { tenantId, name, slug },
       });
-      await this.prisma.documentTag.create({ data: { documentId, tagId: tag.id } });
+      await this.prisma.documentTag.create({
+        data: { tenantId, documentId, tagId: tag.id },
+      });
     }
   }
 
   async create(dto: CreateDocumentDto, actor: JwtUserPayload) {
-    const { code } = await this.nextCode(dto.categoryId);
+    const tenantId = TenantContext.requireTenantId();
     const markdown = dto.contentMarkdown ?? `# ${dto.title}\n\n`;
     const wc = wordCount(markdown);
 
-    const document = await this.prisma.$transaction(async (tx) => {
+    // Filing against an engagement puts the document behind that engagement's
+    // confidentiality boundary, so the actor has to be on the team to do it.
+    if (dto.engagementId) {
+      await this.access.requireEngagementWriteAccess(dto.engagementId, actor);
+    }
+
+    const document = await this.prisma.tenantTransaction(async (tx) => {
+      const { code } = await this.nextCode(tx, tenantId, dto.categoryId);
+
       const doc = await tx.document.create({
         data: {
+          tenantId,
           code,
           title: dto.title,
           summary: dto.summary,
           categoryId: dto.categoryId,
+          engagementId: dto.engagementId,
           authorId: actor.sub,
           confidentiality: dto.confidentiality,
           reviewDate: dto.reviewDate ? new Date(dto.reviewDate) : undefined,
@@ -85,6 +116,7 @@ export class DocumentsService {
 
       await tx.documentVersion.create({
         data: {
+          tenantId,
           documentId: doc.id,
           versionNumber: 1,
           contentMarkdown: markdown,
@@ -109,29 +141,26 @@ export class DocumentsService {
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 25;
 
-    const where: Record<string, unknown> = {
-      deletedAt: null,
+    // Caller filters can only narrow what the predicate already allows — they are
+    // ANDed with it, never substituted for it.
+    const where = await this.access.documentWhereWithFilters(actor, {
       ...(query.categoryId ? { categoryId: query.categoryId } : {}),
+      ...(query.engagementId ? { engagementId: query.engagementId } : {}),
       ...(query.status ? { status: query.status } : {}),
       ...(query.confidentiality ? { confidentiality: query.confidentiality } : {}),
       ...(query.authorId ? { authorId: query.authorId } : {}),
       ...(query.tag ? { tags: { some: { tag: { slug: query.tag } } } } : {}),
-    };
+    });
 
-    if (actor.role === "GUEST") {
-      where.confidentiality = "PUBLIC";
-      where.status = "APPROVED";
-    }
-
-    const [data, total] = await this.prisma.$transaction([
-      this.prisma.document.findMany({
+    const [data, total] = await this.prisma.tenantTransaction(async (tx) => [
+      await tx.document.findMany({
         where,
         include: DOCUMENT_LIST_INCLUDE,
         orderBy: { updatedAt: "desc" },
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
-      this.prisma.document.count({ where }),
+      await tx.document.count({ where }),
     ]);
 
     return {
@@ -144,8 +173,13 @@ export class DocumentsService {
   }
 
   async findById(id: string, actor?: JwtUserPayload) {
+    // Without an actor this is an internal lookup (indexing, notifications). Callers
+    // that serve a user must pass one — the predicate is what stops a direct fetch by
+    // id from returning a document the requester may not read.
+    const visibility = actor ? await this.access.documentWhere(actor) : { deletedAt: null };
+
     const document = await this.prisma.document.findFirst({
-      where: { id, deletedAt: null },
+      where: { AND: [{ id }, visibility] },
       include: {
         ...DOCUMENT_LIST_INCLUDE,
         versions: { orderBy: { versionNumber: "desc" }, take: 1 },
@@ -161,7 +195,7 @@ export class DocumentsService {
       await this.prisma.recentlyViewed.upsert({
         where: { userId_documentId: { userId: actor.sub, documentId: id } },
         update: { viewedAt: new Date() },
-        create: { userId: actor.sub, documentId: id },
+        create: { tenantId: document.tenantId, userId: actor.sub, documentId: id },
       });
       await this.prisma.document.update({ where: { id }, data: { viewCount: { increment: 1 } } });
     }
@@ -222,7 +256,12 @@ export class DocumentsService {
       });
       if (latestVersion && document.approverId) {
         await this.prisma.approval.create({
-          data: { documentId: id, documentVersionId: latestVersion.id, reviewerId: document.approverId },
+          data: {
+          tenantId: document.tenantId,
+          documentId: id,
+          documentVersionId: latestVersion.id,
+          reviewerId: document.approverId,
+        },
         });
         await this.notifications.notify({
           userId: document.approverId,
@@ -277,10 +316,15 @@ export class DocumentsService {
   }
 
   async dashboardStats(actor: JwtUserPayload) {
+    // The dashboard counted every document in the firm regardless of who was asking,
+    // which leaked both engagement existence and volume. Everything here is now scoped
+    // to what the actor may actually read.
+    const visible = await this.access.documentWhere(actor);
+
     const byCategoryRaw = await this.prisma.document.groupBy({
       by: ["categoryId"],
       _count: { _all: true },
-      where: { deletedAt: null },
+      where: visible,
       orderBy: { categoryId: "asc" },
     });
 
@@ -290,31 +334,35 @@ export class DocumentsService {
       awaitingApproval,
       recentlyViewed,
       upcomingReviews,
-    ] = await this.prisma.$transaction([
-      this.prisma.document.count({ where: { deletedAt: null } }),
-      this.prisma.document.findMany({
-        where: { deletedAt: null },
+    ] = await this.prisma.tenantTransaction(async (tx) => [
+      await tx.document.count({ where: visible }),
+      await tx.document.findMany({
+        where: visible,
         orderBy: { updatedAt: "desc" },
         take: 8,
         include: { author: { select: { fullName: true } } },
       }),
-      this.prisma.document.findMany({
-        where: { status: "INTERNAL_REVIEW", deletedAt: null },
+      await tx.document.findMany({
+        where: { AND: [visible, { status: "INTERNAL_REVIEW" }] },
         orderBy: { updatedAt: "asc" },
         take: 8,
         include: { author: { select: { fullName: true } }, approver: { select: { fullName: true } } },
       }),
-      this.prisma.recentlyViewed.findMany({
-        where: { userId: actor.sub },
+      await tx.recentlyViewed.findMany({
+        where: { userId: actor.sub, document: visible },
         orderBy: { viewedAt: "desc" },
         take: 6,
         include: { document: { select: { id: true, code: true, title: true, status: true } } },
       }),
-      this.prisma.document.findMany({
+      await tx.document.findMany({
         where: {
-          deletedAt: null,
-          reviewDate: { lte: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) },
-          status: { not: "ARCHIVED" },
+          AND: [
+            visible,
+            {
+              reviewDate: { lte: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) },
+              status: { not: "ARCHIVED" },
+            },
+          ],
         },
         orderBy: { reviewDate: "asc" },
         take: 8,
@@ -352,7 +400,9 @@ export class DocumentsService {
       await this.prisma.favorite.delete({ where: { userId_documentId: { userId: actor.sub, documentId } } });
       return { favorited: false };
     }
-    await this.prisma.favorite.create({ data: { userId: actor.sub, documentId } });
+    await this.prisma.favorite.create({
+      data: { tenantId: TenantContext.requireTenantId(), userId: actor.sub, documentId },
+    });
     return { favorited: true };
   }
 

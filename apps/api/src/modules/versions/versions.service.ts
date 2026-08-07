@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
+import { TenantContext } from "../../common/tenant/tenant-context";
 import { AuditService } from "../audit/audit.service";
 import type { JwtUserPayload } from "@keyvantic/types";
 import { estimateReadTimeMinutes } from "@keyvantic/types";
@@ -53,9 +54,10 @@ export class VersionsService {
     const nextVersionNumber = document.currentVersionNumber + 1;
     const wc = wordCount(contentMarkdown);
 
-    const version = await this.prisma.$transaction(async (tx) => {
+    const version = await this.prisma.tenantTransaction(async (tx) => {
       const v = await tx.documentVersion.create({
         data: {
+          tenantId: TenantContext.requireTenantId(),
           documentId,
           versionNumber: nextVersionNumber,
           contentMarkdown,

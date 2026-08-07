@@ -1,50 +1,53 @@
 import { Controller, Get, Post, Query } from "@nestjs/common";
+import { ApiTags } from "@nestjs/swagger";
 import { SearchService } from "./search.service";
 import { RequirePermissions } from "../../common/decorators/permissions.decorator";
-import { PrismaService } from "../../prisma/prisma.service";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { JwtUserPayload } from "@keyvantic/types";
 
+/**
+ * Every parameter here is a *narrowing* hint. None of them can widen what the caller
+ * may see — SearchService runs them through the visibility predicate, which is derived
+ * from the authenticated principal alone.
+ */
+@ApiTags("search")
 @Controller("search")
 export class SearchController {
-  constructor(
-    private searchService: SearchService,
-    private prisma: PrismaService,
-  ) {}
+  constructor(private searchService: SearchService) {}
 
   @Get()
   async search(
-    @Query("q") q: string = "",
+    @CurrentUser() user: JwtUserPayload,
+    @Query("q") q = "",
     @Query("categoryId") categoryId?: string,
+    @Query("engagementId") engagementId?: string,
     @Query("status") status?: string,
     @Query("confidentiality") confidentiality?: string,
     @Query("tag") tag?: string,
     @Query("authorId") authorId?: string,
-    @CurrentUser() user?: JwtUserPayload,
   ) {
-    const guestSafe = user?.role === "GUEST";
-    return this.searchService.fullTextSearch(q, {
-      categoryId,
-      status: guestSafe ? "APPROVED" : status,
-      confidentiality: guestSafe ? "PUBLIC" : confidentiality,
-      tag,
-      authorId,
-    });
+    return this.searchService.fullTextSearch(
+      q,
+      { categoryId, engagementId, status, confidentiality, tag, authorId },
+      user,
+    );
   }
 
   @Get("semantic")
   @RequirePermissions("search:semantic")
   async semantic(
-    @Query("q") q: string = "",
+    @CurrentUser() user: JwtUserPayload,
+    @Query("q") q = "",
     @Query("categoryId") categoryId?: string,
+    @Query("engagementId") engagementId?: string,
     @Query("status") status?: string,
   ) {
-    return this.searchService.semanticSearch(q, { categoryId, status });
+    return this.searchService.semanticSearch(q, { categoryId, engagementId, status }, user);
   }
 
   @Post("reindex")
   @RequirePermissions("category:manage")
-  reindex() {
+  async reindex() {
     return this.searchService.reindexAll();
   }
 }

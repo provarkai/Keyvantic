@@ -12,6 +12,11 @@ export class CreateDocumentDto {
   @IsString()
   categoryId!: string;
 
+  /** Files the document behind an engagement's confidentiality boundary. */
+  @IsOptional()
+  @IsString()
+  engagementId?: string;
+
   @IsOptional()
   @IsEnum(ConfidentialityLevel)
   confidentiality?: ConfidentialityLevel;

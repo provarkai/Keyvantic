@@ -3,11 +3,110 @@ import { ConfigService } from "@nestjs/config";
 import { MeiliSearch, type Index } from "meilisearch";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AiClientService } from "../ai/ai-client.service";
+import { AccessService } from "../../common/access/access.service";
+import type { JwtUserPayload } from "@keyvantic/types";
+import type { Prisma } from "@prisma/client";
 
 const INDEX_NAME = "documents";
 
+const DOCUMENT_STATUSES = ["DRAFT", "INTERNAL_REVIEW", "APPROVED", "ARCHIVED"] as const;
+const CONFIDENTIALITY_LEVELS = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"] as const;
+
+export interface SearchFilters {
+  categoryId?: string;
+  engagementId?: string;
+  status?: string;
+  confidentiality?: string;
+  tag?: string;
+  authorId?: string;
+}
+
+/** Ids are opaque cuids; anything else in a filter position is not trusted. */
+const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+function safeId(value: string | undefined): string | undefined {
+  return value && ID_PATTERN.test(value) ? value : undefined;
+}
+
+function oneOf<T extends readonly string[]>(
+  value: string | undefined,
+  allowed: T,
+): T[number] | undefined {
+  return value && (allowed as readonly string[]).includes(value)
+    ? (value as T[number])
+    : undefined;
+}
+
+/**
+ * Build a Meilisearch filter expression from validated values only.
+ *
+ * Every component is either matched against a fixed enum or an id pattern before it
+ * reaches the expression, so nothing user-supplied is interpolated verbatim. This is
+ * belt-and-braces: the results are re-authorised against Postgres regardless.
+ */
+function buildFilterExpression(filters: SearchFilters): string | undefined {
+  const parts: string[] = [];
+  const categoryId = safeId(filters.categoryId);
+  const tag = safeId(filters.tag);
+  const status = oneOf(filters.status, DOCUMENT_STATUSES);
+  const confidentiality = oneOf(filters.confidentiality, CONFIDENTIALITY_LEVELS);
+
+  if (categoryId) parts.push(`categoryId = "${categoryId}"`);
+  if (status) parts.push(`status = "${status}"`);
+  if (confidentiality) parts.push(`confidentiality = "${confidentiality}"`);
+  if (tag) parts.push(`tags = "${tag}"`);
+
+  return parts.length ? parts.join(" AND ") : undefined;
+}
+
+/** Translate caller filters into a Prisma fragment, dropping anything unrecognised. */
+function toPrismaFilter(filters: SearchFilters): Prisma.DocumentWhereInput {
+  const status = oneOf(filters.status, DOCUMENT_STATUSES);
+  const confidentiality = oneOf(filters.confidentiality, CONFIDENTIALITY_LEVELS);
+
+  return {
+    ...(safeId(filters.categoryId) ? { categoryId: filters.categoryId } : {}),
+    ...(safeId(filters.engagementId) ? { engagementId: filters.engagementId } : {}),
+    ...(safeId(filters.authorId) ? { authorId: filters.authorId } : {}),
+    ...(status ? { status: status as Prisma.EnumDocumentStatusFilter["equals"] } : {}),
+    ...(confidentiality
+      ? { confidentiality: confidentiality as Prisma.EnumConfidentialityLevelFilter["equals"] }
+      : {}),
+    ...(safeId(filters.tag) ? { tags: { some: { tag: { slug: filters.tag } } } } : {}),
+  };
+}
+
+function toSearchHit(d: {
+  id: string;
+  code: string;
+  title: string;
+  summary: string | null;
+  categoryId: string;
+  category: { name: string };
+  status: string;
+  confidentiality: string;
+  author: { fullName: string };
+  tags: { tag: { name: string } }[];
+  updatedAt: Date;
+}) {
+  return {
+    id: d.id,
+    code: d.code,
+    title: d.title,
+    summary: d.summary,
+    categoryId: d.categoryId,
+    categoryName: d.category.name,
+    status: d.status,
+    confidentiality: d.confidentiality,
+    authorName: d.author.fullName,
+    tags: d.tags.map((t) => t.tag.name),
+    updatedAt: d.updatedAt.getTime(),
+  };
+}
+
 interface SearchableDocument {
   id: string;
+  tenantId: string;
   code: string;
   title: string;
   summary: string;
@@ -32,6 +131,7 @@ export class SearchService implements OnModuleInit {
     private prisma: PrismaService,
     private config: ConfigService,
     private aiClient: AiClientService,
+    private access: AccessService,
   ) {}
 
   async onModuleInit() {
@@ -42,6 +142,7 @@ export class SearchService implements OnModuleInit {
       });
       this.index = this.client.index<SearchableDocument>(INDEX_NAME);
       await this.index.updateFilterableAttributes([
+        "tenantId",
         "categoryId",
         "status",
         "confidentiality",
@@ -71,6 +172,7 @@ export class SearchService implements OnModuleInit {
 
     const payload: SearchableDocument = {
       id: doc.id,
+      tenantId: doc.tenantId,
       code: doc.code,
       title: doc.title,
       summary: doc.summary ?? "",
@@ -99,96 +201,115 @@ export class SearchService implements OnModuleInit {
     }
   }
 
+  /** Reindexes the calling tenant's documents only — RLS scopes the query. */
   async reindexAll() {
-    const docs = await this.prisma.document.findMany({ where: { deletedAt: null }, select: { id: true } });
+    const docs = await this.prisma.document.findMany({
+      where: { deletedAt: null },
+      select: { id: true },
+    });
     for (const d of docs) await this.indexDocument(d.id);
     return { indexed: docs.length };
   }
 
-  /** Full-text + faceted search, restricted by role/confidentiality upstream by the caller. */
+  /**
+   * Full-text search.
+   *
+   * Meilisearch ranks; Postgres authorises. Hits from the index are only ever used as
+   * a candidate id list, which is then run back through the visibility predicate — so
+   * the index cannot become a second, weaker access-control surface, and a stale or
+   * poisoned index cannot leak a document.
+   *
+   * The previous version passed the caller's `confidentiality` query parameter
+   * straight into a Meilisearch filter string, which both allowed any non-GUEST role
+   * to widen its own access and interpolated user input into the filter expression.
+   */
   async fullTextSearch(
     query: string,
-    filters: { categoryId?: string; status?: string; confidentiality?: string; tag?: string; authorId?: string },
+    filters: SearchFilters,
+    actor: JwtUserPayload,
     limit = 20,
   ) {
-    if (!this.index) return this.fallbackSearch(query, filters, limit);
+    const visibility = await this.access.documentWhereWithFilters(actor, toPrismaFilter(filters));
 
-    const filterExpr: string[] = [];
-    if (filters.categoryId) filterExpr.push(`categoryId = "${filters.categoryId}"`);
-    if (filters.status) filterExpr.push(`status = "${filters.status}"`);
-    if (filters.confidentiality) filterExpr.push(`confidentiality = "${filters.confidentiality}"`);
-    if (filters.tag) filterExpr.push(`tags = "${filters.tag}"`);
+    if (!this.index) return this.rankedByPostgres(query, visibility, limit);
 
+    let candidateIds: string[];
     try {
+      // Over-fetch: some hits will be filtered out by the predicate below.
       const result = await this.index.search(query, {
-        filter: filterExpr.length ? filterExpr.join(" AND ") : undefined,
-        limit,
+        filter: buildFilterExpression(filters),
+        limit: Math.min(limit * 5, 200),
         attributesToHighlight: ["title", "summary", "content"],
       });
-      return result.hits;
+      candidateIds = result.hits.map((h) => h.id);
     } catch (err) {
       this.logger.warn(`Meilisearch query failed, using fallback: ${(err as Error).message}`);
-      return this.fallbackSearch(query, filters, limit);
+      return this.rankedByPostgres(query, visibility, limit);
     }
+
+    if (candidateIds.length === 0) return [];
+
+    const permitted = await this.prisma.document.findMany({
+      where: { AND: [visibility, { id: { in: candidateIds } }] },
+      include: { category: true, author: true, tags: { include: { tag: true } } },
+    });
+
+    // Restore Meilisearch's relevance order, which the id-based refetch loses.
+    const rank = new Map(candidateIds.map((id, i) => [id, i]));
+    return permitted
+      .sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0))
+      .slice(0, limit)
+      .map(toSearchHit);
   }
 
-  /** Postgres ILIKE fallback used when Meilisearch is unreachable (dev environments, outages). */
-  private async fallbackSearch(
+  /** Postgres search over exactly the documents the actor may read. */
+  private async rankedByPostgres(
     query: string,
-    filters: { categoryId?: string; status?: string; confidentiality?: string; tag?: string },
+    visibility: Prisma.DocumentWhereInput,
     limit: number,
   ) {
     const docs = await this.prisma.document.findMany({
       where: {
-        deletedAt: null,
-        ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
-        ...(filters.status ? { status: filters.status as any } : {}),
-        ...(filters.confidentiality ? { confidentiality: filters.confidentiality as any } : {}),
-        ...(filters.tag ? { tags: { some: { tag: { slug: filters.tag } } } } : {}),
-        OR: [
-          { title: { contains: query, mode: "insensitive" } },
-          { summary: { contains: query, mode: "insensitive" } },
+        AND: [
+          visibility,
+          query
+            ? {
+                OR: [
+                  { title: { contains: query, mode: "insensitive" } },
+                  { summary: { contains: query, mode: "insensitive" } },
+                  { code: { contains: query, mode: "insensitive" } },
+                ],
+              }
+            : {},
         ],
       },
       include: { category: true, author: true, tags: { include: { tag: true } } },
+      orderBy: { updatedAt: "desc" },
       take: limit,
     });
-    return docs.map((d) => ({
-      id: d.id,
-      code: d.code,
-      title: d.title,
-      summary: d.summary,
-      categoryId: d.categoryId,
-      categoryName: d.category.name,
-      status: d.status,
-      confidentiality: d.confidentiality,
-      authorName: d.author.fullName,
-      tags: d.tags.map((t) => t.tag.name),
-      updatedAt: d.updatedAt.getTime(),
-    }));
+    return docs.map(toSearchHit);
   }
 
   /**
-   * Semantic search: embeds the query and each candidate document (cached),
-   * ranks by cosine similarity. Requires OPENAI_API_KEY — otherwise falls
-   * back transparently to full-text search.
+   * Semantic search over the actor's visible corpus.
+   *
+   * Candidates are drawn through the visibility predicate before anything is embedded,
+   * so a document the actor cannot read is never sent to the embedding provider and
+   * can never surface in results. The previous version applied no filter at all here.
    */
   async semanticSearch(
     query: string,
-    filters: { categoryId?: string; status?: string; confidentiality?: string },
+    filters: SearchFilters,
+    actor: JwtUserPayload,
     limit = 20,
   ) {
     if (!this.aiClient.isEnabled()) {
-      return this.fullTextSearch(query, filters, limit);
+      return this.fullTextSearch(query, filters, actor, limit);
     }
 
+    const visibility = await this.access.documentWhereWithFilters(actor, toPrismaFilter(filters));
     const candidates = await this.prisma.document.findMany({
-      where: {
-        deletedAt: null,
-        status: filters.status ? (filters.status as any) : undefined,
-        categoryId: filters.categoryId,
-        confidentiality: filters.confidentiality ? (filters.confidentiality as any) : undefined,
-      },
+      where: visibility,
       include: { category: true, author: true },
       take: 200,
     });

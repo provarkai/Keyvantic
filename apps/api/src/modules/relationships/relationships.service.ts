@@ -4,6 +4,7 @@ import { CreateRelationshipDto } from "./dto/create-relationship.dto";
 import { AuditService } from "../audit/audit.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import type { JwtUserPayload } from "@keyvantic/types";
+import { TenantContext } from "../../common/tenant/tenant-context";
 
 @Injectable()
 export class RelationshipsService {
@@ -16,6 +17,7 @@ export class RelationshipsService {
   async create(sourceDocumentId: string, dto: CreateRelationshipDto, actor: JwtUserPayload) {
     const relationship = await this.prisma.documentRelationship.create({
       data: {
+        tenantId: TenantContext.requireTenantId(),
         sourceDocumentId,
         targetDocumentId: dto.targetDocumentId,
         type: dto.type,

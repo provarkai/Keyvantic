@@ -70,6 +70,7 @@ export const PERMISSION_ACTIONS = [
   "document:export",
   "category:manage",
   "client:manage",
+  "engagement:manage",
   "comment:create",
   "user:manage",
   "role:manage",
@@ -85,11 +86,11 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<RoleName, PermissionAction[]> = {
   [RoleName.PARTNER]: [
     "document:create", "document:read", "document:update", "document:submit_review",
     "document:approve", "document:archive", "document:export", "category:manage",
-    "client:manage", "comment:create", "ai:query", "search:semantic",
+    "client:manage", "engagement:manage", "comment:create", "ai:query", "search:semantic",
   ],
   [RoleName.CONSULTANT]: [
     "document:create", "document:read", "document:update", "document:submit_review",
-    "document:export", "client:manage", "comment:create", "ai:query", "search:semantic",
+    "document:export", "client:manage", "engagement:manage", "comment:create", "ai:query", "search:semantic",
   ],
   [RoleName.RESEARCHER]: [
     "document:create", "document:read", "document:update", "document:submit_review",
@@ -110,8 +111,18 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<RoleName, PermissionAction[]> = {
   [RoleName.GUEST]: ["document:read"],
 };
 
+export enum EngagementAccessLevel {
+  LEAD = "LEAD",
+  MEMBER = "MEMBER",
+  VIEWER = "VIEWER",
+  /** An ethical wall: an explicit block that overrides any role permission held. */
+  DENIED = "DENIED",
+}
+
 export interface JwtUserPayload {
   sub: string;
+  /** The tenant this session is scoped to. Drives Row-Level Security on every query. */
+  tenantId: string;
   email: string;
   role: RoleName;
   permissions: PermissionAction[];
