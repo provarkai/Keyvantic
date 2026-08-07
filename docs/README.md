@@ -17,6 +17,7 @@ KOS is the system of record for Keyvantic's intellectual property: frameworks, m
 | [07-development-roadmap.md](./07-development-roadmap.md) | Phased roadmap from foundation through future modules |
 | [08-security-architecture.md](./08-security-architecture.md) | AuthN/AuthZ, RBAC matrix, confidentiality levels, audit, OWASP mitigations |
 | [09-deployment-guide.md](./09-deployment-guide.md) | Local dev via Docker Compose, environment variables, production deployment, CI/CD |
+| [10-saas-product-scope.md](./10-saas-product-scope.md) | Scoping draft for the multi-tenant SaaS product — secure AI-powered CRM with a document vault for professional services firms |
 
 ## Core Concepts at a Glance
 
