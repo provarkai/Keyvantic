@@ -15,6 +15,7 @@ import { RolesModule } from "./modules/roles/roles.module";
 import { CategoriesModule } from "./modules/categories/categories.module";
 import { ClientsModule } from "./modules/clients/clients.module";
 import { EngagementsModule } from "./modules/engagements/engagements.module";
+import { VaultModule } from "./modules/vault/vault.module";
 import { DocumentsModule } from "./modules/documents/documents.module";
 import { VersionsModule } from "./modules/versions/versions.module";
 import { TagsModule } from "./modules/tags/tags.module";
@@ -40,6 +41,7 @@ import { HealthModule } from "./modules/health/health.module";
     CategoriesModule,
     ClientsModule,
     EngagementsModule,
+    VaultModule,
     DocumentsModule,
     VersionsModule,
     TagsModule,

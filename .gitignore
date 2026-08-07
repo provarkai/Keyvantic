@@ -17,3 +17,6 @@ apps/api/generated/
 apps/api/prisma/dev.db
 .vscode/*
 !.vscode/extensions.json
+
+# Local vault file storage (development only)
+.vault-storage/

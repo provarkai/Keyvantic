@@ -6,10 +6,12 @@ import { AiClientService } from "./ai-client.service";
 import type { JwtUserPayload } from "@keyvantic/types";
 
 const SYSTEM_PROMPT = `You are the Keyvantic Knowledge Operating System internal assistant.
-You answer ONLY using the approved-document excerpts provided in the user message as context.
+You answer ONLY using the excerpts provided in the user message as context.
 Never use outside knowledge. If the context does not contain the answer, say so plainly and
-suggest which Master Library category might have it. Always cite source documents by their
-Document ID (e.g. KV-BS-001) when you use information from them. Keep answers concise and in a
+suggest which Master Library category might have it. Always cite sources by their ID
+(e.g. KV-BS-001) when you use information from them. Context comes from two kinds of source:
+approved documents, which carry the firm's sign-off, and uploaded files, which do not. When an
+answer rests on an uploaded file, say so, so the reader knows it has not been approved. Keep answers concise and in a
 professional consulting tone.`;
 
 export interface RetrievedContext {
@@ -18,6 +20,8 @@ export interface RetrievedContext {
   title: string;
   categoryName?: string;
   excerpt: string;
+  /** Distinguishes an approved authored document from an uploaded file. */
+  kind: "document" | "file";
 }
 
 const STOPWORDS = new Set([
@@ -101,13 +105,70 @@ export class AiService {
           take: limit,
         });
 
-    return pool.map((doc) => ({
+    const documents: RetrievedContext[] = pool.map((doc) => ({
       id: doc.id,
       code: doc.code,
       title: doc.title,
       categoryName: doc.category.name,
       excerpt: (doc.versions[0]?.contentMarkdown ?? doc.summary ?? "").slice(0, 1500),
+      kind: "document" as const,
     }));
+
+    const files = await this.retrieveVaultContext(keywords, actor, Math.max(2, limit - documents.length));
+    return [...documents, ...files];
+  }
+
+  /**
+   * Uploaded files the actor may read, as additional grounding.
+   *
+   * Files have no approval lifecycle, so they cannot be gated on APPROVED the way
+   * authored documents are. They are surfaced as a distinct source kind so a citation
+   * never implies a file carries the firm's sign-off when it does not. SEALED files
+   * have no extracted text and so can never appear here.
+   */
+  private async retrieveVaultContext(
+    keywords: string[],
+    actor: JwtUserPayload,
+    limit: number,
+  ): Promise<RetrievedContext[]> {
+    if (limit <= 0) return [];
+    const visibility = await this.access.vaultItemWhere(actor);
+
+    const items = await this.prisma.vaultItem.findMany({
+      where: {
+        AND: [
+          visibility,
+          keywords.length
+            ? {
+                OR: keywords.flatMap((word) => [
+                  { name: { contains: word, mode: "insensitive" as const } },
+                  {
+                    versions: {
+                      some: { extractedText: { contains: word, mode: "insensitive" as const } },
+                    },
+                  },
+                ]),
+              }
+            : {},
+        ],
+      },
+      include: {
+        engagement: { select: { name: true } },
+        versions: { orderBy: { versionNumber: "desc" }, take: 1 },
+      },
+      take: limit,
+    });
+
+    return items
+      .filter((item) => item.versions[0]?.extractedText)
+      .map((item) => ({
+        id: item.id,
+        code: `FILE-${item.id.slice(-6).toUpperCase()}`,
+        title: item.name,
+        categoryName: item.engagement?.name ?? "Uploaded file",
+        excerpt: (item.versions[0]?.extractedText ?? "").slice(0, 1500),
+        kind: "file" as const,
+      }));
   }
 
   async ask(question: string, actor: JwtUserPayload) {
@@ -116,7 +177,7 @@ export class AiService {
     if (context.length === 0) {
       return {
         answer:
-          "I couldn't find any approved documents relevant to that question. Try rephrasing, or ask a Partner/Administrator to review a draft covering this topic.",
+          "I couldn't find anything in your approved documents or uploaded files relevant to that question. Try rephrasing, or ask a Partner/Administrator to review a draft covering this topic.",
         sources: [],
         modelBacked: false,
       };
@@ -132,7 +193,7 @@ export class AiService {
     );
 
     if (answer) {
-      return { answer, sources: context.map(({ id, code, title }) => ({ id, code, title })), modelBacked: true };
+      return { answer, sources: context.map(({ id, code, title, kind }) => ({ id, code, title, kind })), modelBacked: true };
     }
 
     // Extractive fallback when no OPENAI_API_KEY is configured: surface the
@@ -155,8 +216,10 @@ export class AiService {
       })
       .join("\n\n");
     return {
-      answer: `AI model access is not configured, so here are the most relevant approved excerpts instead:\n\n${extractive}`,
-      sources: context.map(({ id, code, title }) => ({ id, code, title })),
+      // Says "sources" rather than "approved excerpts": retrieval now also covers
+      // uploaded files, which carry no approval, and the label has to stay accurate.
+      answer: `AI model access is not configured, so here are the most relevant sources instead:\n\n${extractive}`,
+      sources: context.map(({ id, code, title, kind }) => ({ id, code, title, kind })),
       modelBacked: false,
     };
   }

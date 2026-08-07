@@ -119,6 +119,27 @@ enum EngagementAccessLevel {
   DENIED
 }
 
+/// How a stored file is protected, and therefore what the platform can do with it.
+/// See /docs/10-saas-product-scope.md §2 — this is the vault-vs-AI tradeoff, made
+/// explicit per file rather than assumed for the whole product.
+enum FileClassification {
+  /// Envelope-encrypted at rest; the server can decrypt, so the file is searchable
+  /// and available to AI retrieval.
+  WORKING
+
+  /// Reserved for client-side encrypted files the server cannot read. Not yet
+  /// implemented end-to-end — uploads currently reject this classification rather
+  /// than silently storing readable bytes under a name that promises otherwise.
+  SEALED
+}
+
+enum ScanStatus {
+  PENDING
+  CLEAN
+  INFECTED
+  SKIPPED
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Tenancy
 // ────────────────────────────────────────────────────────────────────────
@@ -132,6 +153,12 @@ model Tenant {
   status     TenantStatus @default(TRIAL)
   createdAt  DateTime     @default(now())
   updatedAt  DateTime     @updatedAt
+
+  /// This tenant's data encryption key, wrapped by the deployment master key.
+  /// Per-tenant keys are what make crypto-shredding possible: destroying this row
+  /// renders every file for the firm permanently unreadable while leaving the audit
+  /// history of what existed intact.
+  wrappedDek Bytes?
 
   members       TenantMember[]
   roles         Role[]
@@ -152,6 +179,8 @@ model Tenant {
   recentViews   RecentlyViewed[]
   sequences     DocumentSequence[]
   engagementMembers EngagementMember[]
+  vaultItems    VaultItem[]
+  vaultVersions VaultFileVersion[]
 }
 
 /// Identity is global — one person, one login, potentially several firms (contractors,
@@ -181,6 +210,8 @@ model User {
   favorites         Favorite[]
   recentlyViewed    RecentlyViewed[]
   refreshTokens     RefreshToken[]
+  vaultItems        VaultItem[]        @relation("VaultUploader")
+  vaultVersions     VaultFileVersion[] @relation("VaultVersionUploader")
 }
 
 /// A user's membership of one tenant, carrying the role they hold *there*.
@@ -270,6 +301,7 @@ model Category {
   updatedAt   DateTime   @updatedAt
 
   documents   Document[]
+  vaultItems  VaultItem[]
   client      Client?            @relation("ClientRootCategory")
   engagements Engagement[]       @relation("EngagementRootCategory")
   sequences   DocumentSequence[]
@@ -322,8 +354,9 @@ model Engagement {
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 
-  members   EngagementMember[]
-  documents Document[]
+  members    EngagementMember[]
+  documents  Document[]
+  vaultItems VaultItem[]
 
   @@unique([tenantId, reference])
   @@index([tenantId])
@@ -398,6 +431,7 @@ model Document {
   favoritedBy   Favorite[]
   recentViews   RecentlyViewed[]
   notifications Notification[]
+  vaultItems    VaultItem[]
 
   relationshipsFrom DocumentRelationship[] @relation("SourceDocument")
   relationshipsTo   DocumentRelationship[] @relation("TargetDocument")
@@ -487,6 +521,79 @@ model DocumentRelationship {
   @@index([sourceDocumentId])
   @@index([targetDocumentId])
   @@index([tenantId])
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Vault — uploaded files
+// ────────────────────────────────────────────────────────────────────────
+
+/// An uploaded file as a stable thing with a history, mirroring Document/DocumentVersion.
+/// Access is resolved exactly like a Document: engagement membership first, then
+/// confidentiality clearance.
+model VaultItem {
+  id              String               @id @default(cuid())
+  tenantId        String
+  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name            String
+  description     String?
+  categoryId      String?
+  category        Category?            @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  engagementId    String?
+  engagement      Engagement?          @relation(fields: [engagementId], references: [id], onDelete: SetNull)
+  /// Optional link to an authored document this file supports.
+  documentId      String?
+  document        Document?            @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  classification  FileClassification   @default(WORKING)
+  confidentiality ConfidentialityLevel @default(INTERNAL)
+  currentVersion  Int                  @default(1)
+  uploadedById    String
+  uploadedBy      User                 @relation("VaultUploader", fields: [uploadedById], references: [id])
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  deletedAt       DateTime?
+
+  versions VaultFileVersion[]
+
+  @@index([tenantId])
+  @@index([engagementId])
+  @@index([categoryId])
+  @@index([documentId])
+}
+
+/// One stored blob. Append-only, like DocumentVersion — re-uploading adds a version
+/// rather than overwriting, so "which file did we send on that date" stays answerable.
+model VaultFileVersion {
+  id            String     @id @default(cuid())
+  tenantId      String
+  tenant        Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  vaultItemId   String
+  vaultItem     VaultItem  @relation(fields: [vaultItemId], references: [id], onDelete: Cascade)
+  versionNumber Int
+
+  storageKey     String
+  originalName   String
+  mimeType       String
+  sizeBytes      Int
+  checksumSha256 String
+
+  /// Envelope encryption: a per-file key, wrapped by the tenant key, which is itself
+  /// wrapped by the deployment master key. Only the wrapped form is ever persisted.
+  wrappedDek Bytes
+  iv         Bytes
+  authTag    Bytes
+
+  /// Populated for WORKING files only. This is what makes an upload searchable and
+  /// visible to AI retrieval; SEALED files have no server-readable text by design.
+  extractedText String?     @db.Text
+  scanStatus    ScanStatus  @default(PENDING)
+
+  uploadedById String
+  uploadedBy   User     @relation("VaultVersionUploader", fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  @@unique([vaultItemId, versionNumber])
+  @@index([tenantId])
+  @@index([vaultItemId])
 }
 
 // ────────────────────────────────────────────────────────────────────────

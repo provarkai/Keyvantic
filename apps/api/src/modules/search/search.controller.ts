@@ -33,6 +33,11 @@ export class SearchController {
     );
   }
 
+  @Get("files")
+  async files(@CurrentUser() user: JwtUserPayload, @Query("q") q = "") {
+    return this.searchService.searchVaultFiles(q, user);
+  }
+
   @Get("semantic")
   @RequirePermissions("search:semantic")
   async semantic(

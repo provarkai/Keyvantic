@@ -167,6 +167,61 @@ export class AccessService {
   }
 
   /**
+   * The same rules, applied to uploaded files.
+   *
+   * Files have no approval lifecycle, so there is no status clause — otherwise this is
+   * the document predicate: walls are absolute, your own uploads are yours, and
+   * everything else needs clearance plus engagement membership.
+   */
+  async vaultItemWhere(actor: JwtUserPayload): Promise<Prisma.VaultItemWhereInput> {
+    const scope = await this.scopeFor(actor);
+
+    const wall: Prisma.VaultItemWhereInput = scope.deniedEngagementIds.length
+      ? {
+          OR: [
+            { engagementId: null },
+            { engagementId: { notIn: scope.deniedEngagementIds } },
+          ],
+        }
+      : {};
+
+    const engagementClause: Prisma.VaultItemWhereInput = scope.seesAllEngagements
+      ? {}
+      : {
+          OR: [
+            { engagementId: null },
+            { engagementId: { in: scope.allowedEngagementIds } },
+          ],
+        };
+
+    return {
+      deletedAt: null,
+      AND: [
+        wall,
+        {
+          OR: [
+            { uploadedById: actor.sub },
+            {
+              AND: [
+                { confidentiality: { in: this.levelsUpTo(scope.clearance) } },
+                engagementClause,
+              ],
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  /** Fetch a vault item by id, or throw, applying exactly the same rules. */
+  async requireReadableVaultItem(id: string, actor: JwtUserPayload) {
+    const where = await this.vaultItemWhere(actor);
+    const item = await this.prisma.vaultItem.findFirst({ where: { AND: [{ id }, where] } });
+    if (!item) throw new NotFoundException("File not found");
+    return item;
+  }
+
+  /**
    * Narrow a caller-supplied filter so it can only ever subtract from what the actor
    * may see. Query parameters are combined with `AND`, never substituted for the
    * predicate — the previous search endpoint took `confidentiality` straight from the

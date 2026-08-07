@@ -76,6 +76,19 @@ function toPrismaFilter(filters: SearchFilters): Prisma.DocumentWhereInput {
   };
 }
 
+/** A window of text around the first match, so a hit shows why it matched. */
+function excerptAround(text: string | null, query: string, radius = 160): string | null {
+  if (!text) return null;
+  if (!query) return text.slice(0, radius * 2);
+
+  const at = text.toLowerCase().indexOf(query.toLowerCase());
+  if (at === -1) return text.slice(0, radius * 2);
+
+  const start = Math.max(0, at - radius);
+  const end = Math.min(text.length, at + query.length + radius);
+  return `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
+}
+
 function toSearchHit(d: {
   id: string;
   code: string;
@@ -260,6 +273,64 @@ export class SearchService implements OnModuleInit {
       .sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0))
       .slice(0, limit)
       .map(toSearchHit);
+  }
+
+  /**
+   * Search uploaded files by name and extracted text.
+   *
+   * Runs entirely in Postgres against `VaultFileVersion.extractedText`, scoped by the
+   * vault predicate. Only WORKING files have extracted text at all, so SEALED files
+   * can match on name but never on content — which is the classification working as
+   * intended rather than a gap.
+   */
+  async searchVaultFiles(query: string, actor: JwtUserPayload, limit = 20) {
+    const visibility = await this.access.vaultItemWhere(actor);
+
+    const items = await this.prisma.vaultItem.findMany({
+      where: {
+        AND: [
+          visibility,
+          query
+            ? {
+                OR: [
+                  { name: { contains: query, mode: "insensitive" } },
+                  { description: { contains: query, mode: "insensitive" } },
+                  {
+                    versions: {
+                      some: { extractedText: { contains: query, mode: "insensitive" } },
+                    },
+                  },
+                ],
+              }
+            : {},
+        ],
+      },
+      include: {
+        engagement: { select: { id: true, name: true, reference: true } },
+        uploadedBy: { select: { fullName: true } },
+        versions: { orderBy: { versionNumber: "desc" }, take: 1 },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: limit,
+    });
+
+    return items.map((item) => {
+      const latest = item.versions[0];
+      return {
+        id: item.id,
+        kind: "file" as const,
+        name: item.name,
+        originalName: latest?.originalName,
+        mimeType: latest?.mimeType,
+        sizeBytes: latest?.sizeBytes,
+        classification: item.classification,
+        confidentiality: item.confidentiality,
+        engagement: item.engagement,
+        uploadedBy: item.uploadedBy.fullName,
+        excerpt: excerptAround(latest?.extractedText ?? null, query),
+        updatedAt: item.updatedAt.getTime(),
+      };
+    });
   }
 
   /** Postgres search over exactly the documents the actor may read. */
